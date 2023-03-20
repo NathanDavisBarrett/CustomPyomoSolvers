@@ -10,6 +10,7 @@
 #include<limits> //numeric_limits
 #include<chrono> //time_point
 #include<utility> //pair
+#include<map> //map
 
 #include <unistd.h> //sleep
 
@@ -47,6 +48,7 @@ protected:
     size_t numVar = 0;
     size_t numConstr = 0;
     std::string* varNames = NULL;
+    std::map<std::string, size_t> varIDs;
     int* basisVars = NULL;
     size_t tableauHeight = 0;
     size_t tableauWidth = 0;
@@ -61,6 +63,12 @@ protected:
 
     size_t maxIter = 0;
     Scalar maxTime = 0;
+
+    bool modelOptimized;
+
+    bool enableLiveUpdates = false;
+    size_t liveUpdateIter = 0;
+    Scalar liveUpdateTime = 0;
 
     std::vector<std::pair<size_t, std::string>> logs;
     
@@ -110,6 +118,7 @@ public:
         varNames = new std::string[numVar];
         for (size_t i = 0; i < numVar; i++) {
             varNames[i] = initVarNames[i];
+            varIDs[varNames[i]] = i;
         }
 
         tableauHeight = numConstr + 1;
@@ -156,6 +165,7 @@ public:
         lastColStart = tableauWidth - 1;
         lastColEnd = tableauHeight * tableauWidth;
 
+        modelOptimized = false;
         modelEngaged = true;
     }
 
@@ -172,7 +182,9 @@ public:
             basisVars = NULL;
             tableauHeight = 0;
             tableauWidth = 0;
+            varIDs.clear();
 
+            modelOptimized = false;
             modelEngaged = false;
         }
     }
@@ -308,6 +320,14 @@ public:
         return str;
     }
 
+    std::string FormatSizeT(size_t num, size_t width) {
+        std::stringstream ss;
+        ss << num;
+        std::string str = FormatString(ss.str(),width);
+
+        return str;
+    }
+
     std::string TableauToTerminalString() {
         size_t cellWidth = 10;
         for (size_t i = 0; i < numVar; i++) {
@@ -414,6 +434,50 @@ public:
     
     virtual void Solve() = 0;
 
+    Scalar GetVariableValue(std::string varName) {
+        if (!modelOptimized) {
+            log(LOG_WARN,"Attempting to access the value of \"" + varName + "\" within a model that has not yet been optimized.");
+        }
+        size_t varIndex;
+        try {
+            varIndex = varIDs.at(varName);
+        }
+        catch (const std::out_of_range& err) {
+            ASSERT(false,"Error! Attempting to access the value of a variable that is not registered as part of this model.");
+        }
+
+        size_t basisIndex;
+        bool indexFound = false;
+        for (size_t i = 0; i < numConstr; i++) {
+            if (basisVars[i] == varIndex) {
+                basisIndex = i;
+                indexFound = true;
+                break;
+            }
+        }
+
+        if (!indexFound) {
+            return 0.0;
+        }
+        else {
+            return tableauBody[(basisIndex+1) * tableauWidth - 1];
+        }
+    }
+
+    Scalar GetObjectiveValue() {
+        return tableauBody[tableauWidth * tableauHeight - 1];
+    }
+
+    void SetLiveUpdateSettings(size_t newLiveUpdateIter, Scalar newLiveUpdateTime) {
+        enableLiveUpdates = true;
+        liveUpdateIter = newLiveUpdateIter;
+        liveUpdateTime = newLiveUpdateTime;
+    }
+
+    void PrintUpdate(size_t itr, Scalar time) {
+        std::cout << "Itr: " << FormatSizeT(itr,10) << " Time: " << FormatScalar(time,15) << " Objective Value: " << GetObjectiveValue() << '\n';
+    }
+
 };
 
 class SimplexSolver_MaximizeRC: public SimplexSolver {
@@ -488,11 +552,12 @@ public:
 
         bool solutionIsOptimal = GetOptimalityStatus();
 
-        std::cout << TableauToTerminalString() << "\n\n";
-
         size_t iterationNum = 0;
         tic();
         size_t exitCode = 0;
+
+        size_t liveUpdateIterCounter = 0;
+        size_t liveUpdateTimeCounter = 0;
         while (!solutionIsOptimal) {
             if (iterationNum > maxIter) {
                 exitCode = 1;
@@ -500,26 +565,39 @@ public:
                 break;
             }
             iterationNum++;
-            if (toc() > maxTime) {
+            Scalar currentTime = toc();
+            if (currentTime > maxTime) {
                 exitCode = 2;
                 log(LOG_INFO,"Maximum solve time exceeded.");
                 break;
+            }
+
+            if (enableLiveUpdates) {
+                liveUpdateIterCounter++;
+                if (liveUpdateIterCounter == liveUpdateIter) {
+                    PrintUpdate(iterationNum,currentTime);
+                    liveUpdateIterCounter = 0;
+                }
+                if (currentTime > liveUpdateTime * liveUpdateTimeCounter) {
+                    PrintUpdate(iterationNum,currentTime);
+                    liveUpdateTimeCounter++;
+                }
             }
 
             size_t pivotCol = ComputePivotColumn();
             size_t pivotRow = ComputePivotRow(pivotCol);
             PerformPivot(pivotCol,pivotRow);
 
-            std::cout << TableauToTerminalString() << "\n\n";
-
             solutionIsOptimal = GetOptimalityStatus();
         }
 
         if (exitCode == 0) {
             log(LOG_INFO,"Optimal solution found.");
+            modelOptimized = true;
         }
         log(LOG_INFO,std::to_string(iterationNum) + " iterations");
         log(LOG_INFO,std::to_string(toc()) + " seconds");
+        log(LOG_INFO,"Best Found Objective Function Value: " + std::to_string(GetObjectiveValue()));
     }
 };
 
@@ -534,5 +612,8 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
         .def("TableauToString", &SimplexSolver_MaximizeRC::TableauToString)
         .def("setMaxIter",&SimplexSolver_MaximizeRC::setMaxIter)
         .def("setMaxTime",&SimplexSolver_MaximizeRC::setMaxTime)
-        .def("GetLogs",&SimplexSolver_MaximizeRC::GetLogs);
+        .def("GetLogs",&SimplexSolver_MaximizeRC::GetLogs)
+        .def("GetVariableValue",&SimplexSolver_MaximizeRC::GetVariableValue)
+        .def("GetObjectiveValue",&SimplexSolver_MaximizeRC::GetObjectiveValue)
+        .def("SetLiveUpdateSettings",&SimplexSolver_MaximizeRC::SetLiveUpdateSettings);
 }

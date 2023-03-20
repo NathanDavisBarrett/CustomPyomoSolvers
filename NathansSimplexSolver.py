@@ -14,11 +14,17 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             "Basis_IO_Approach": ["MaximizeRC"],
             "maxIter": ["AnyPositiveInt"],
             "maxTime": ["AnyPositiveFloat"],
+            "LiveUpdate": [False,"iter","time"],
+            "LiveUpdateIter": ["AnyPositiveFloat"],
+            "LiveUpdateTime": ["AnyPositiveFloat"]
         }
         self.currentOptions = {
             "Basis_IO_Approach": "MaximizeRC",
             "maxIter": np.iinfo(np.int64).max,
             "maxTime": np.inf,
+            "LiveUpdate": False,
+            "LiveUpdateIter": np.iinfo(np.int64).max,
+            "LiveUpdateTime": np.inf
         }
 
     def _recurseExprTree(self,expr,varNames,multiplier=1):
@@ -67,10 +73,13 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
     @options.setter
     def options(self, val):
-        errorMessage = "Options can only be set to a dict{String-> (String or Numeric)} object."
+        errorMessage = "Options can only be set to a dict object."
 
         if type(val) != dict:
             raise Exception(errorMessage)
+
+        if "LiveUpdateIter" in val or "LiveUpdateTime" in val:
+            self.currentOptions["LiveUpdate"] = True
 
         for key in val:
             if type(key) != str:
@@ -78,13 +87,13 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             if type(val[key]) not in [int,float,str]:
                 raise Exception(errorMessage)
 
-            if key == "maxIter":
+            if key in ["maxIter","LiveUpdateIter"]:
                 if val[key] < 0:
-                    raise Exception("maxIter must be positive.")
+                    raise Exception("{} must be a positive integer.".format(key))
                 self.currentOptions[key] = int(val[key])
-            elif key == "maxTime":
+            elif key in ["maxTime","LiveUpdateTime"]:
                 if val[key] < 0:
-                    raise Exception("maxTime must be positive.")
+                    raise Exception("{} must be a positive float.".format(key))
                 self.currentOptions[key] = float(val[key])
             else:
                 if key in self.availableOptions.keys():
@@ -181,12 +190,24 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         else:
             raise Exception("The Basis_IO_Approach \"{}\" went un-initialized. This is a bug.")
 
+        if self.currentOptions["LiveUpdate"]:
+            solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
+
 
         solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c,basis)
         solver.Solve()
-        print(solver.GetLogs())
 
-        STOP2
+        logs = solver.GetLogs()
+        logLevels = ["ERROR"," WARN"," INFO"]
+        if len(logs) > 0:
+            print("Solver Messages:")
+        for level,message in logs:
+            print("\t{}: {}".format(logLevels[level],message))
+        
+        for var in modelData._var:
+            var.value = solver.GetVariableValue(var.name)
+
+        
         
 
             
