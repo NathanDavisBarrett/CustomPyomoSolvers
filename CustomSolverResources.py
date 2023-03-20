@@ -24,7 +24,7 @@ class GenericSolverInterface(object):
         pass
 
     def license_is_valid(self):# -> bool:
-        pass
+        return True
 
     def version(self):# -> Tuple:
         pass

@@ -6,7 +6,12 @@ import random
 import string
 import numpy as np
 
+import nathans_Simplex_solver_py
+
 class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
+    def __init__(self):
+        self.solver = nathans_Simplex_solver_py.SimplexSolver()
+
     def _recurseExprTree(self,expr,varNames,multiplier=1):
         coefs = np.zeros(len(varNames))
         const = 0
@@ -44,6 +49,29 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         else:
             raise Exception("{} is not a recognized expression subtype. It probably just needs to be coded in here.".format(exprType))
 
+    def version(self):# -> Tuple:
+        return (0,0,1)
+
+    @property
+    def options(self):# -> ConfigDict:
+        return self.solver.GetCurrentOptions()
+
+    @options.setter
+    def options(self, val):
+        errorMessage = "Options can only be set to a dict{String-> (String or Numeric)}object."
+
+        if type(val) != dict:
+            raise Exception(errorMessage)
+
+        for key in val:
+            if type(key) != str:
+                raise Exception(errorMessage)
+            if type(val[key]) not in [int,float,str]:
+                raise Exception(errorMessage)
+
+            val[key] = str(val[key])
+        self.solver.SetOptions(val)
+
     def solve(self,
               model,#: _BlockData,
               tee=False,#: bool = False,
@@ -73,14 +101,14 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
         for i in range(len(constrExpressions)):
             if "<=" in constrExpressions[i]:
-                newSlackVar = slackVarBase + "[]".format(slackIndex)
+                newSlackVar = slackVarBase + "[{}]".format(slackIndex)
                 varNames.append(newSlackVar)
                 slackIndex += 1
 
                 slackAdditions[i] = (1,newSlackVar)
 
             elif ">=" in constrExpressions:
-                newSlackVar = slackVarBase + "[]".format(slackIndex)
+                newSlackVar = slackVarBase + "[{}]".format(slackIndex)
                 varNames.append(newSlackVar)
                 slackIndex += 1
 
@@ -103,15 +131,30 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             varData = leftData[0] - rightData[0]
             constData = rightData[1] - leftData[1]
 
+            if slackAdditions[i] != None:
+                contribution, varName = slackAdditions[i]
+                varIndex = varNames.index(varName)
+                varData[varIndex] = contribution
+
             A[i,:] = varData
             b[i] = constData
 
         if len(modelData._obj) != 1:
             raise Exception("Error! Haven't programed how to handle multiple objective functions yet.")
 
-        c = self._recurseExprTree(modelData._obj[0].expr,varNames)
+        recurseC = self._recurseExprTree(modelData._obj[0].expr,varNames)
+
+        c = np.append(recurseC[0],recurseC[1])
         
         #Now pass these matrices to C++
+        basis = []
+        for _,varName in slackAdditions:
+            basis.append(varNames.index(varName))
+        
+        self.solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c,basis)
+        print(self.solver.TableauToString())
+
+        STOP2
         
 
             

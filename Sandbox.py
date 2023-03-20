@@ -29,7 +29,8 @@ def myConstraint(m,i,j):
     return sum([m.x[i,j,k] for k in m.K]) <= b[i,j]
 model.myConstraint = pyo.Constraint(model.I_J, rule=myConstraint)
 
-pyo.SolverFactory('NathansSimplexSolver').solve(model)#.write()
+solver = pyo.SolverFactory('NathansSimplexSolver')
+solver.solve(model)#.write()
 
 #model.objFunc.display()
 print("ObjFunc = {}".format(model.objFunc()))
