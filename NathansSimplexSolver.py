@@ -10,7 +10,16 @@ import nathans_Simplex_solver_py
 
 class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
     def __init__(self):
-        self.solver = nathans_Simplex_solver_py.SimplexSolver()
+        self.availableOptions = {
+            "Basis_IO_Approach": ["MaximizeRC"],
+            "maxIter": ["AnyPositiveInt"],
+            "maxTime": ["AnyPositiveFloat"],
+        }
+        self.currentOptions = {
+            "Basis_IO_Approach": "MaximizeRC",
+            "maxIter": np.iinfo(np.int64).max,
+            "maxTime": np.inf,
+        }
 
     def _recurseExprTree(self,expr,varNames,multiplier=1):
         coefs = np.zeros(len(varNames))
@@ -54,11 +63,11 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
     @property
     def options(self):# -> ConfigDict:
-        return self.solver.GetCurrentOptions()
+        return self.currentOptions
 
     @options.setter
     def options(self, val):
-        errorMessage = "Options can only be set to a dict{String-> (String or Numeric)}object."
+        errorMessage = "Options can only be set to a dict{String-> (String or Numeric)} object."
 
         if type(val) != dict:
             raise Exception(errorMessage)
@@ -69,8 +78,22 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             if type(val[key]) not in [int,float,str]:
                 raise Exception(errorMessage)
 
-            val[key] = str(val[key])
-        self.solver.SetOptions(val)
+            if key == "maxIter":
+                if val[key] < 0:
+                    raise Exception("maxIter must be positive.")
+                self.currentOptions[key] = int(val[key])
+            elif key == "maxTime":
+                if val[key] < 0:
+                    raise Exception("maxTime must be positive.")
+                self.currentOptions[key] = float(val[key])
+            else:
+                if key in self.availableOptions.keys():
+                    if val[key] in self.availableOptions[key]:
+                        self.currentOptions[key] = val[key]
+                    else:
+                        raise Exception("{} is not a valid option for {}".format(val[key],key))
+                else:
+                    raise Exception("{} is not a recognized option".format(key))
 
     def solve(self,
               model,#: _BlockData,
@@ -151,8 +174,17 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         for _,varName in slackAdditions:
             basis.append(varNames.index(varName))
         
-        self.solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c,basis)
-        print(self.solver.TableauToString())
+        if self.currentOptions["Basis_IO_Approach"] == "MaximizeRC":
+            solver = nathans_Simplex_solver_py.SimplexSolver_MaximizeRC()
+            solver.setMaxIter(self.currentOptions["maxIter"])
+            solver.setMaxTime(self.currentOptions["maxTime"])
+        else:
+            raise Exception("The Basis_IO_Approach \"{}\" went un-initialized. This is a bug.")
+
+
+        solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c,basis)
+        solver.Solve()
+        print(solver.GetLogs())
 
         STOP2
         

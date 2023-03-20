@@ -3,23 +3,32 @@
 #include<pybind11/pybind11.h>
 #include<pybind11/stl.h>
 
-#include<iostream>
-#include<string>
-#include<vector>
-#include<sstream>
-#include<map>
-#include<limits>
-#include<time.h>
+#include<iostream> //cerr
+#include<string> //string
+#include<vector> //vector
+#include<sstream> //stringstream
+#include<limits> //numeric_limits
+#include<chrono> //time_point
+#include<utility> //pair
+
+#include <unistd.h> //sleep
+
+#define LOG_ERROR 0
+#define LOG_WARN 1
+#define LOG_INFO 2
 
 //from https://stackoverflow.com/questions/3767869/adding-message-to-assert
 #   define ASSERT(condition, message) \
     do { \
         if (! (condition)) { \
+            log(LOG_ERROR,message); \
             std::cerr << "Assertion `" #condition "` failed in " << __FILE__ \
                       << " line " << __LINE__ << ": " << message << std::endl; \
             std::terminate(); \
         } \
     } while (false)
+
+
 
 namespace py = pybind11;
 
@@ -29,8 +38,11 @@ float DummyFunc(float arg1, float arg2) {
     return arg1 + arg2;
 }
 
+typedef std::chrono::high_resolution_clock clock_;
+typedef std::chrono::duration<double, std::ratio<1> > second_;
+
 class SimplexSolver {
-private:
+protected:
     Scalar* tableauBody = NULL;
     size_t numVar = 0;
     size_t numConstr = 0;
@@ -38,26 +50,39 @@ private:
     int* basisVars = NULL;
     size_t tableauHeight = 0;
     size_t tableauWidth = 0;
-    std::map<std::string, std::string> options;
-    std::map<std::string, std::vector<std::string>> allowedOptions;
     bool modelEngaged = false;
-    time_t tic_time;
+    std::chrono::time_point<clock_> tic_time;
     Scalar SCALAR_INF = 0;
     size_t SIZE_T_INF = 0;
     size_t bottomRowStart = 0;
     size_t bottomRowEnd = 0;
     size_t lastColStart = 0;
     size_t lastColEnd = 0;
+
+    size_t maxIter = 0;
+    Scalar maxTime = 0;
+
+    std::vector<std::pair<size_t, std::string>> logs;
     
 public:
     SimplexSolver() {
         SCALAR_INF = std::numeric_limits<Scalar>::max();
         SIZE_T_INF = std::numeric_limits<size_t>::max();
-        SetupOptions();
+
+        maxIter = SIZE_T_INF;
+        maxTime = SCALAR_INF;
     }
 
     ~SimplexSolver() {
         DisengageModel();
+    }
+
+    void log(size_t level, const std::string& message) {
+        logs.push_back(std::make_pair(level, message));
+    }
+
+    std::vector<std::pair<size_t,std::string>> GetLogs() {
+        return logs;
     }
 
     void EngageModel(
@@ -152,19 +177,16 @@ public:
         }
     }
 
-    void SetupOptions() {
-        allowedOptions["Basis_IO_Approach"] = {"MaximizeRC"};
-        options["Basis_IO_Approach"] = "MaximizeRC";
+    void setMaxIter(size_t newMaxIter) {
+        maxIter = newMaxIter;
+    }
 
-        allowedOptions["maxIter"] = {"inf","anyPositiveInt"};
-        options["maxIter"] = "inf";
-
-        allowedOptions["maxTime"] = {"inf","anyPositiveFloat"};
-        options["maxTime"] = "inf";
+    void setMaxTime(Scalar newMaxTime) {
+        maxTime = newMaxTime;
     }
 
     std::string TableauToString() {
-        return TableauToMarkdownString();
+        return TableauToTerminalString();
     }
 
     std::string TableauToMarkdownString() {
@@ -243,72 +265,92 @@ public:
         return ss.str();
     }
 
-    std::map<std::string, std::string> GetCurrentOptions() {
-        return options;
+    std::string FormatString(const std::string& str, size_t width) {
+        size_t numSpaces = width - str.length();
+        size_t numFirstHalf = numSpaces / 2;
+        size_t numSecondHalf = numSpaces - numFirstHalf;
+
+        std::stringstream ss;
+        for (size_t i = 0; i < numFirstHalf; i++) {
+            ss << " ";
+        }
+        ss << str;
+        for (size_t i = 0; i < numSecondHalf; i++) {
+            ss << " ";
+        }
+        return ss.str();
     }
 
-    template <typename T>
-    T StringToNumeric(const std::string& str) {
-        std::stringstream ss(str);
-        T result;
-        ss >> result;
-        return result;
+    std::string FormatScalar(const Scalar& num, size_t width, size_t precision = 6) {
+        std::stringstream ss;
+        ss.precision(precision);
+        bool addNeg = false;
+        if (num < 0) {
+            ss << -num;
+            addNeg = true;
+        }
+        else{
+            ss << num;
+        }
+        std::string str = FormatString(ss.str(),width);
+
+        if (addNeg) {
+            size_t startIndex = -1;
+            for (size_t i = 0; i < str.length(); i++) {
+                if (str.at(i) != ' ') {
+                    startIndex = i;
+                    break;
+                }
+            }
+
+            str.replace(startIndex-1,1,"-");
+        }
+        return str;
     }
 
-    void CheckOption(const std::string& id, const std::string& op) {
-        if (allowedOptions.find(id) == allowedOptions.end()) {
-            ASSERT(false,"Error! \"" + id + "\" is not a recognized setting.");
+    std::string TableauToTerminalString() {
+        size_t cellWidth = 10;
+        for (size_t i = 0; i < numVar; i++) {
+            if (varNames[i].length() > cellWidth) {
+                cellWidth = varNames[i].length() + 2;
+            }
         }
-        std::vector<std::string> validOptions = allowedOptions[id];
 
-        bool valid = std::find(validOptions.begin(), validOptions.end(), op) != validOptions.end();
-        if (!valid) {
-            bool handled = false;
-            if (std::find(validOptions.begin(), validOptions.end(), "anyPositiveInt") != validOptions.end()) {
-                try {
-                    int test = StringToNumeric<int>(op); //FIXME: This might not allways throw an error. For example, it it's a float, then this will be fine. Or, if it's a string that happens to have an int in it, then it's fine.
-                    if (test >= 0) {
-                        handled = true;
-                    }
-                }
-                catch (const std::invalid_argument& e) {}
-            }
-            if (std::find(validOptions.begin(), validOptions.end(), "anyPositiveFloat") != validOptions.end()) {
-                try {
-                    Scalar test = StringToNumeric<Scalar>(op); //FIXME: Similar thing here.
-                    if (test >= 0) {
-                        handled = true;
-                    }
-                }
-                catch (const std::invalid_argument& e) {}
-            }
+        const std::string vertBar = " | ";
+        const std::string horiBar(cellWidth * (tableauWidth + 1) + 2 * vertBar.length(), '-');
 
-            if (handled) {
-                return;
-            }
+        std::stringstream ss;
 
-            std::stringstream message;
-            message << "Error! \"" << op << "\" is not a valid option for \"" << id << "\". Valid options are [";
-            for (size_t i = 0; i < validOptions.size(); i++) {
-                message << "\"" << validOptions[i] << "\"";
-                if (i != validOptions.size() - 1) {
-                    message << ", ";
-                }
-            }
-            message << "]";
-            ASSERT(false, message.str());
+        ss << FormatString("BASIS",cellWidth) << vertBar;
+        for (size_t i = 0; i < numVar; i++) {
+            ss << FormatString(varNames[i],cellWidth);
         }
-    }
+        ss << vertBar << "CONSTANT\n" << horiBar << "\n";
 
-    void SetOptions(std::map<std::string, std::string>& newOptions) {
-        for (auto i : newOptions) {
-            CheckOption(i.first,i.second);
-            options[i.first] = i.second;
+        for (size_t i = 0; i < numConstr; i++) {
+            ss << FormatString(varNames[basisVars[i]],cellWidth) << vertBar;
+            for (size_t j = tableauWidth * i; j < tableauWidth * (i+1) - 1; j++) {
+                ss << FormatScalar(tableauBody[j],cellWidth);
+            }
+            ss << vertBar << FormatScalar(tableauBody[tableauWidth * (i+1) - 1],cellWidth) << "\n";
         }
+
+        ss << horiBar << "\n";
+        for (size_t i = 0; i < cellWidth; i++) {
+            ss << " ";
+        }
+        ss << vertBar;
+
+        for (size_t j = tableauWidth * (tableauHeight-1); j < tableauWidth * tableauHeight - 1; j++) {
+            ss << FormatScalar(tableauBody[j],cellWidth);
+        }
+        ss << vertBar << FormatScalar(tableauBody[tableauWidth * tableauHeight - 1],cellWidth) << "\n";
+
+        return ss.str();
     }
 
     bool LessThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
-        return (val - tollerance) < 0.0;
+        return (val + tollerance) < 0.0;
     }
 
     bool EqualsZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
@@ -321,11 +363,11 @@ public:
     }
 
     void tic() {
-        tic_time = time(NULL);
+        tic_time = clock_::now();
     }
 
     Scalar toc() {
-        return difftime(time(NULL), tic_time);
+        return std::chrono::duration_cast<second_>(clock_::now() - tic_time).count();
     }
 
     bool GetOptimalityStatus() {
@@ -339,7 +381,45 @@ public:
         return optimal;
     }
 
-    size_t ComputePivotColumn_MaximizeRC() {
+    virtual size_t ComputePivotColumn() = 0;
+
+    virtual size_t ComputePivotRow(size_t pivotCol) = 0;
+
+    void PerformPivot(const size_t& pivotCol, const size_t& pivotRow) {
+        //Step 1: Divide the pivot row by the pivot value
+        Scalar pivotValue = tableauBody[tableauWidth * pivotRow + pivotCol];
+
+        size_t startVal = tableauWidth * pivotRow;
+        size_t endVal = startVal + tableauWidth;
+
+        for (size_t i = startVal; i < endVal; i++) {
+            tableauBody[i] /= pivotValue;
+        }
+
+        //Step 2: Row reduce all the other rows so that the pivot value (which is now 1) is the only non-zero value in the pivot column
+        for (size_t row_i = 0; row_i < tableauHeight; row_i++) {
+            if (row_i == pivotRow) {
+                continue;
+            }
+
+            Scalar rowMultiplier = tableauBody[row_i * tableauWidth + pivotCol];
+            for (size_t col_i = 0; col_i < tableauWidth; col_i++) {
+                tableauBody[row_i * tableauWidth + col_i] -= rowMultiplier * tableauBody[pivotRow * tableauWidth + col_i];
+            }
+        }
+
+        //Step 3: Swap in the appropriate basis valriable
+        basisVars[pivotRow] = pivotCol;
+    }
+    
+    virtual void Solve() = 0;
+
+};
+
+class SimplexSolver_MaximizeRC: public SimplexSolver {
+private:
+public:
+    size_t ComputePivotColumn() {
         size_t columnIndex = 0;
         Scalar minBottomVal = tableauBody[bottomRowStart];
 
@@ -354,7 +434,7 @@ public:
         return columnIndex;
     }
 
-    size_t ComputePivotRow_MaximizeRC(const size_t& pivotCol) {
+    size_t ComputePivotRow(size_t pivotCol) {
         size_t rowIndex = 0;
 
         size_t lastRowIndex = lastColStart;
@@ -391,33 +471,6 @@ public:
         return rowIndex;
     }
 
-    void PerformPivot(const size_t& pivotCol, const size_t& pivotRow) {
-        //Step 1: Divide the pivot row by the pivot value
-        Scalar pivotValue = tableauBody[tableauWidth * pivotRow + pivotCol];
-
-        size_t startVal = tableauWidth * pivotRow;
-        size_t endVal = startVal + tableauWidth;
-
-        for (size_t i = startVal; i < endVal; i++) {
-            tableauBody[i] /= pivotValue;
-        }
-
-        //Step 2: Row reduce all the other rows so that the pivot value (which is now 1) is the only non-zero value in the pivot column
-        for (size_t row_i = 0; row_i < tableauHeight; row_i++) {
-            if (row_i == pivotRow) {
-                continue;
-            }
-
-            Scalar rowMultiplier = tableauBody[row_i * tableauWidth + pivotCol];
-            for (size_t col_i = 0; col_i < tableauWidth; col_i++) {
-                tableauBody[row_i * tableauWidth + col_i] -= rowMultiplier * tableauBody[pivotRow * tableauWidth + col_i];
-            }
-        }
-
-        //Step 3: Swap in the appropriate basis valriable
-        basisVars[pivotRow] = pivotCol;
-    }
-    
     void Solve() {
         //Make sure model is engaged before proceeding
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
@@ -435,35 +488,7 @@ public:
 
         bool solutionIsOptimal = GetOptimalityStatus();
 
-        size_t maxIter;
-        if (options["maxIter"] == "inf") {
-            maxIter = SIZE_T_INF;
-        }
-        else {
-            maxIter = StringToNumeric<size_t>(options["maxIter"]);
-        }
-
-        Scalar maxTime;
-        if (options["maxTime"] == "inf") {
-            maxTime = SCALAR_INF;
-        }
-        else {
-            maxTime = StringToNumeric<Scalar>(options["maxTime"]);
-        }
-
-        size_t (SimplexSolver::*ComputePivotColumn)() const = NULL;
-        size_t (SimplexSolver::*ComputePivotRow)(size_t) const = NULL;
-
-
-        std::string basisIOApproach = options["Basis_IO_Approach"];
-        if (basisIOApproach == "MaximizeRC") {
-            ComputePivotColumn = &(this->ComputePivotColumn_MaximizeRC);
-            ComputePivotRow = &(this->ComputePivotRow_MaximizeRC);
-        }
-        else {
-            ASSERT(false,"Error! Basis_IO_Approach not recognized. This is a bug.");
-        }
-
+        std::cout << TableauToTerminalString() << "\n\n";
 
         size_t iterationNum = 0;
         tic();
@@ -471,11 +496,13 @@ public:
         while (!solutionIsOptimal) {
             if (iterationNum > maxIter) {
                 exitCode = 1;
+                log(LOG_INFO,"Maximum number of Iterations Exceeded.");
                 break;
             }
             iterationNum++;
             if (toc() > maxTime) {
                 exitCode = 2;
+                log(LOG_INFO,"Maximum solve time exceeded.");
                 break;
             }
 
@@ -483,20 +510,29 @@ public:
             size_t pivotRow = ComputePivotRow(pivotCol);
             PerformPivot(pivotCol,pivotRow);
 
-        }
-    };
+            std::cout << TableauToTerminalString() << "\n\n";
 
+            solutionIsOptimal = GetOptimalityStatus();
+        }
+
+        if (exitCode == 0) {
+            log(LOG_INFO,"Optimal solution found.");
+        }
+        log(LOG_INFO,std::to_string(iterationNum) + " iterations");
+        log(LOG_INFO,std::to_string(toc()) + " seconds");
+    }
 };
 
 PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
     handle.doc() = "The C++ implementation of Nathan's Simplex Solver.\n To operate, instantiate a SimplexSolver object by passing the following as arguments: numVar, numConstr, varNames, the A matrix (flattened using A.flatten() or A.flatten('C')), the b vector, the vector.\nThen specify any neccecary solver options.\nThen execute the solving operation using the Solve() method.";
     handle.def("DummyFunc", &DummyFunc);
 
-    py::class_<SimplexSolver>(handle, "SimplexSolver")
+    py::class_<SimplexSolver_MaximizeRC>(handle, "SimplexSolver_MaximizeRC")
         .def(py::init<>())
-        .def("EngageModel", &SimplexSolver::EngageModel)
-        .def("Solve", &SimplexSolver::Solve)
-        .def("GetCurrentOptions", &SimplexSolver::GetCurrentOptions)
-        .def("SetOptions", &SimplexSolver::SetOptions)
-        .def("TableauToString", &SimplexSolver::TableauToString);
+        .def("EngageModel", &SimplexSolver_MaximizeRC::EngageModel)
+        .def("Solve", &SimplexSolver_MaximizeRC::Solve)
+        .def("TableauToString", &SimplexSolver_MaximizeRC::TableauToString)
+        .def("setMaxIter",&SimplexSolver_MaximizeRC::setMaxIter)
+        .def("setMaxTime",&SimplexSolver_MaximizeRC::setMaxTime)
+        .def("GetLogs",&SimplexSolver_MaximizeRC::GetLogs);
 }
