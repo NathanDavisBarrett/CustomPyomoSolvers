@@ -60,6 +60,8 @@ protected:
     size_t bottomRowEnd = 0;
     size_t lastColStart = 0;
     size_t lastColEnd = 0;
+    bool pointerOwnership = true;
+    bool enableVariableNames = true;
 
     size_t maxIter = 0;
     Scalar maxTime = 0;
@@ -120,6 +122,7 @@ public:
             varNames[i] = initVarNames[i];
             varIDs[varNames[i]] = i;
         }
+        enableVariableNames = true;
 
         tableauHeight = numConstr + 1;
         tableauWidth = numVar + 1;
@@ -165,15 +168,52 @@ public:
         lastColStart = tableauWidth - 1;
         lastColEnd = tableauHeight * tableauWidth;
 
+        pointerOwnership = true;
+
         modelOptimized = false;
         modelEngaged = true;
     }
 
+    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, int* initBasisVars, std::string* initVarNames = NULL, bool transferOwnership = false) {
+        if (modelEngaged) {
+            DisengageModel();
+        }
+
+        tableauBody = initTableauBody;
+        numVar = initNumVar;
+        numConstr = initNumConstr;
+        varNames = initVarNames;
+        if (initVarNames == NULL) {
+            enableVariableNames = false;
+        }
+        else {
+            for (size_t i = 0; i < numVar; i++) {
+                varIDs[varNames[i]] = i;
+            }
+        }
+        basisVars = initBasisVars;
+        tableauHeight = numConstr + 1;
+        tableauWidth = numVar + 1;
+
+        bottomRowStart = tableauWidth * numConstr;
+        bottomRowEnd = bottomRowStart + numVar;
+
+        lastColStart = tableauWidth - 1;
+        lastColEnd = tableauHeight * tableauWidth;
+
+        modelEngaged = true;
+        modelOptimized = false;
+    }
+
     void DisengageModel() {
         if (modelEngaged) {
-            delete[] varNames;
-            delete[] tableauBody;
-            delete[] basisVars;
+            if (pointerOwnership) {
+                if (enableVariableNames) {
+                    delete[] varNames;
+                }
+                delete[] tableauBody;
+                delete[] basisVars;
+            }
 
             tableauBody = NULL;
             numVar = 0;
@@ -183,6 +223,8 @@ public:
             tableauHeight = 0;
             tableauWidth = 0;
             varIDs.clear();
+            pointerOwnership = false;
+            enableVariableNames = false;
 
             modelOptimized = false;
             modelEngaged = false;
@@ -202,6 +244,13 @@ public:
     }
 
     std::string TableauToMarkdownString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+
         std::stringstream ss;
         ss << "$\\begin{array}{c|";
         for (size_t i = 0; i < numVar; i++) {
@@ -229,10 +278,21 @@ public:
         }
         ss << "\\\\\n\\end{array}$";
 
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
+
         return ss.str();
     }
 
     std::string TableauToCSVString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+
         std::stringstream ss;
         ss << "BASIS, |, ";
         for (size_t i = 0; i < numVar; i++) {
@@ -273,6 +333,10 @@ public:
             ss << ", " << tableauBody[ii];
         }
         ss << "\n";
+
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
 
         return ss.str();
     }
@@ -329,6 +393,13 @@ public:
     }
 
     std::string TableauToTerminalString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+        
         size_t cellWidth = 10;
         for (size_t i = 0; i < numVar; i++) {
             if (varNames[i].length() > cellWidth) {
@@ -365,6 +436,10 @@ public:
             ss << FormatScalar(tableauBody[j],cellWidth);
         }
         ss << vertBar << FormatScalar(tableauBody[tableauWidth * tableauHeight - 1],cellWidth) << "\n";
+
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
 
         return ss.str();
     }
@@ -435,6 +510,8 @@ public:
     virtual void Solve() = 0;
 
     Scalar GetVariableValue(std::string varName) {
+        ASSERT(enableVariableNames,"Error! You cannot get the variable values by name when variable names are not enabled. Use GetVariableValue(size_t index) instead.");
+
         if (!modelOptimized) {
             log(LOG_WARN,"Attempting to access the value of \"" + varName + "\" within a model that has not yet been optimized.");
         }
@@ -446,6 +523,25 @@ public:
             ASSERT(false,"Error! Attempting to access the value of a variable that is not registered as part of this model.");
         }
 
+        size_t basisIndex;
+        bool indexFound = false;
+        for (size_t i = 0; i < numConstr; i++) {
+            if (basisVars[i] == varIndex) {
+                basisIndex = i;
+                indexFound = true;
+                break;
+            }
+        }
+
+        if (!indexFound) {
+            return 0.0;
+        }
+        else {
+            return tableauBody[(basisIndex+1) * tableauWidth - 1];
+        }
+    }
+
+    Scalar GetVariableValue(size_t varIndex) {
         size_t basisIndex;
         bool indexFound = false;
         for (size_t i = 0; i < numConstr; i++) {
@@ -607,13 +703,14 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
 
     py::class_<SimplexSolver_MaximizeRC>(handle, "SimplexSolver_MaximizeRC")
         .def(py::init<>())
-        .def("EngageModel", &SimplexSolver_MaximizeRC::EngageModel)
+        .def("EngageModel", static_cast<void (SimplexSolver_MaximizeRC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<int>&)>(&SimplexSolver_MaximizeRC::EngageModel))
         .def("Solve", &SimplexSolver_MaximizeRC::Solve)
         .def("TableauToString", &SimplexSolver_MaximizeRC::TableauToString)
         .def("setMaxIter",&SimplexSolver_MaximizeRC::setMaxIter)
         .def("setMaxTime",&SimplexSolver_MaximizeRC::setMaxTime)
         .def("GetLogs",&SimplexSolver_MaximizeRC::GetLogs)
-        .def("GetVariableValue",&SimplexSolver_MaximizeRC::GetVariableValue)
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_MaximizeRC::*)(std::string)>(&SimplexSolver_MaximizeRC::GetVariableValue))
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_MaximizeRC::*)(size_t)>(&SimplexSolver_MaximizeRC::GetVariableValue))
         .def("GetObjectiveValue",&SimplexSolver_MaximizeRC::GetObjectiveValue)
         .def("SetLiveUpdateSettings",&SimplexSolver_MaximizeRC::SetLiveUpdateSettings);
 }
