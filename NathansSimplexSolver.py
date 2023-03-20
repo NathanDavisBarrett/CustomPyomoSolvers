@@ -121,6 +121,11 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         modelData = CustomSolverResources.model_interface(model)
 
         varNames = [var.name for var in modelData._var]
+
+        for var in modelData._var:
+            if not var.is_continuous():
+                raise Exception("Error! The variable {} is not continuous. This Simplex Solver can only handle continuous variables. Did you mean to call NathansMILPSolver?")
+
         constrExpressions = [str(constr.expr) for constr in modelData._con]
 
         #Add Slack Variables
@@ -178,11 +183,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
         c = np.append(recurseC[0],recurseC[1])
         
-        #Now pass these matrices to C++
-        basis = []
-        for _,varName in slackAdditions:
-            basis.append(varNames.index(varName))
-        
+        #Now pass these matrices to C++        
         if self.currentOptions["Basis_IO_Approach"] == "MaximizeRC":
             solver = nathans_Simplex_solver_py.SimplexSolver_MaximizeRC()
             solver.setMaxIter(self.currentOptions["maxIter"])
@@ -194,7 +195,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
 
 
-        solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c,basis)
+        solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c)
         solver.Solve()
 
         logs = solver.GetLogs()
@@ -207,16 +208,9 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         for var in modelData._var:
             var.value = solver.GetVariableValue(var.name)
 
-        
-        
-
-            
-
-
-
-
-
-        
-
-
 SolverFactory.register('NathansSimplexSolver', doc='Basic Simplex Solver by Nathan Barrett')(NathansSimplexSolver)
+
+class NathansMILPSolver(CustomSolverResources.GenericSolverInterface):
+    pass
+
+SolverFactory.register('NathansMILPSolver', doc='Basic MILP Solver by Nathan Barrett')(NathansMILPSolver)

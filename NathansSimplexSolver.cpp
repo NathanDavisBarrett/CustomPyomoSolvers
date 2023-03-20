@@ -101,8 +101,7 @@ public:
         std::vector<std::string>& initVarNames,
         std::vector<Scalar>& initA,
         std::vector<Scalar>& initB,
-        std::vector<Scalar>& initC,
-        std::vector<int>& initBasis
+        std::vector<Scalar>& initC
         ) {
         if (modelEngaged) {
             DisengageModel();
@@ -112,7 +111,6 @@ public:
         ASSERT(initA.size() == initNumVar * initNumConstr,"ERROR! The size of the specified A matrix does not match the number of variables and constraints specified.");
         ASSERT(initB.size() == initNumConstr,"ERROR! The size of the specified b vector does not match the specified number of constraints.");
         ASSERT(initC.size() == initNumVar + 1,"ERROR! The size of the specified c vector does not match the specified number of variables.");
-        ASSERT(initBasis.size() <= initNumConstr,"ERROR! The size of the spcified basis is larger than the number of constraints. This is not allowed.");
 
         numVar = initNumVar;
         numConstr = initNumConstr;
@@ -152,15 +150,7 @@ public:
             }
         }
 
-        basisVars = new int[numConstr];
-        for (size_t i = 0; i < numConstr; i++) {
-            if (i < initBasis.size()) {
-                basisVars[i] = initBasis[i];
-            }
-            else {
-                basisVars[i] = -1;
-            }
-        }
+        basisVars = NULL;
 
         bottomRowStart = tableauWidth * numConstr;
         bottomRowEnd = bottomRowStart + numVar;
@@ -174,7 +164,7 @@ public:
         modelEngaged = true;
     }
 
-    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, int* initBasisVars, std::string* initVarNames = NULL, bool transferOwnership = false) {
+    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, int* initBasisVars = NULL, std::string* initVarNames = NULL, bool transferOwnership = false) {
         if (modelEngaged) {
             DisengageModel();
         }
@@ -212,7 +202,9 @@ public:
                     delete[] varNames;
                 }
                 delete[] tableauBody;
-                delete[] basisVars;
+                if (basisVars != NULL) {
+                    delete[] basisVars;
+                }
             }
 
             tableauBody = NULL;
@@ -636,15 +628,9 @@ public:
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
 
         //Make sure basis is complete. If not, run pre-solve.
-        bool basisIsComplete = true;
-        for (size_t i = 0; i < numConstr; i++) {
-            if (basisVars[i] == -1) {
-                basisIsComplete = false;
-                break;
-            }
-        }
+        bool basisIsGiven = basisVars != NULL;
 
-        ASSERT(basisIsComplete,"ERROR! I haven't coded how to handle an incomplete basis yet.");
+        ASSERT(basisIsGiven,"ERROR! I haven't coded how to handle an empty basis yet.");
 
         bool solutionIsOptimal = GetOptimalityStatus();
 
@@ -655,6 +641,7 @@ public:
         size_t liveUpdateIterCounter = 0;
         size_t liveUpdateTimeCounter = 0;
         while (!solutionIsOptimal) {
+            std::cout << TableauToTerminalString() << "\n";
             if (iterationNum > maxIter) {
                 exitCode = 1;
                 log(LOG_INFO,"Maximum number of Iterations Exceeded.");
@@ -703,7 +690,7 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
 
     py::class_<SimplexSolver_MaximizeRC>(handle, "SimplexSolver_MaximizeRC")
         .def(py::init<>())
-        .def("EngageModel", static_cast<void (SimplexSolver_MaximizeRC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<int>&)>(&SimplexSolver_MaximizeRC::EngageModel))
+        .def("EngageModel", static_cast<void (SimplexSolver_MaximizeRC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&)>(&SimplexSolver_MaximizeRC::EngageModel))
         .def("Solve", &SimplexSolver_MaximizeRC::Solve)
         .def("TableauToString", &SimplexSolver_MaximizeRC::TableauToString)
         .def("setMaxIter",&SimplexSolver_MaximizeRC::setMaxIter)
