@@ -46,12 +46,11 @@ class SimplexSolver {
 protected:
     Scalar* tableauBody = NULL;
     size_t numVar = 0;
+    size_t numBaseVar = 0;
     size_t numConstr = 0;
     std::string* varNames = NULL;
-    size_t numSlackRelationships;
-    std::pair<size_t,size_t>* slackRelationships; //(variableIndex, constrIndex)
     std::map<std::string, size_t> varIDs;
-    int* basisVars = NULL;
+    //int* basisVars = NULL; DEPRECATED SINCE WE'RE GOING TO SCAN THROUGH AT THE END TO CHECK FOR DEGENERACY.
     size_t tableauHeight = 0;
     size_t tableauWidth = 0;
     bool modelEngaged = false;
@@ -64,6 +63,8 @@ protected:
     size_t lastColEnd = 0;
     bool pointerOwnership = true;
     bool enableVariableNames = true;
+    bool auxProblemSolved = false;
+    bool maximizationProblem = true;
 
     size_t maxIter = 0;
     Scalar maxTime = 0;
@@ -78,6 +79,10 @@ protected:
 
     static const int UNBOUNDED_FLAG = 001;
     static const int INFEASIBLE_FLAG = 002;
+
+    static const size_t CONSTR_EQ = 0;
+    static const size_t CONSTR_LEQ = 1;
+    static const size_t COSNTR_GEQ = 2;
     
 public:
     SimplexSolver() {
@@ -104,10 +109,11 @@ public:
         size_t& initNumVar,
         size_t& initNumConstr,
         std::vector<std::string>& initVarNames,
-        std::vector<std::pair<size_t,size_t>>& initSlackRelationships,
         std::vector<Scalar>& initA,
         std::vector<Scalar>& initB,
-        std::vector<Scalar>& initC
+        std::vector<Scalar>& initC,
+        std::vector<size_t>& constrTypes,
+        bool initMaximization
         ) {
         if (modelEngaged) {
             DisengageModel();
@@ -117,59 +123,190 @@ public:
         ASSERT(initA.size() == initNumVar * initNumConstr,"ERROR! The size of the specified A matrix does not match the number of variables and constraints specified.");
         ASSERT(initB.size() == initNumConstr,"ERROR! The size of the specified b vector does not match the specified number of constraints.");
         ASSERT(initC.size() == initNumVar + 1,"ERROR! The size of the specified c vector does not match the specified number of variables.");
+        ASSERT(constrTypes.size() == initNumConstr,"ERROR! The size of the specified constraint type vector does not match the specified number of constraints.");
 
-        numVar = initNumVar;
-        numConstr = initNumConstr;
+        maximizationProblem = initMaximization;
 
-        varNames = new std::string[numVar];
-        for (size_t i = 0; i < numVar; i++) {
-            varNames[i] = initVarNames[i];
-            varIDs[varNames[i]] = i;
+        //First, we need to deal with the different constraint types
+        size_t numLEQ = 0;
+        size_t numGEQ = 0;
+        size_t numEQ = 0;
+        for (size_t i = 0; i < initNumConstr; i++) {
+            if (constrTypes[i] == CONSTR_EQ) {
+                numLEQ++;
+                numGEQ++;
+                numEQ++;
+            }
+            else if (constrTypes[i] == CONSTR_LEQ) {
+                numLEQ++;
+            }
+            else {
+                numGEQ++;
+            }
         }
-        enableVariableNames = true;
 
-        numSlackRelationships = initSlackRelationships.size();
-        slackRelationships = new std::pair<size_t,size_t>[numSlackRelationships];
-        for (size_t i = 0; i < numSlackRelationships; i++) {
-            slackRelationships[i] = initSlackRelationships[i];
+        numVar = initNumVar + numLEQ + 2 * numGEQ;
+        numBaseVar = initNumVar;
+        numConstr = initNumConstr + numEQs;
+
+        if (numGEQ > 0) {
+            //This indicates that we'll need to sovle the auxilary problem first and then the normal problem
+            //Solving the auxilary problem involves including the initial objective with it's function as a constraint.
+            auxProblemSolved = false;
+            numVar += 1;
+            numConstr += 1;
+        }
+        else {
+            //This indicates that each of the LEQ's slack vars form the initial basis. We don't need to solve the auxilary problem
+            auxProblemSolved = true;
         }
 
         tableauHeight = numConstr + 1;
         tableauWidth = numVar + 1;
         tableauBody = new Scalar[tableauWidth * tableauHeight];
 
+
+        enableVariableNames = true;
+        varNames = new std::string[numVar];
+        //First, load the original variables
+        for (size_t i = 0; i < initNumVar; i++) {
+            varNames[i] = initVarNames[i];
+            varIDs[varNames[i]] = i;
+        }
+        //Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
+        std::string baseSlackVarName = "SLACK_VAR_";
+        for (size_t i = 0; i < numConstr; i++) {
+            varNames[numBaseVar + i] = baseSlackVarName + std::to_string(i);
+        }
+        //Now create the artificial variables. These will be indexed in sequence following the slack variables.
+        std::string baseArtVarNAme = "ARTIF_VAR_";
+        for (size_t i = 0; i < numGEQ; i++) {
+            varNames[numBaseVar + numConstr + i] = baseArtVarNAme + std::to_string(i);
+        }
+        //If artificial variables are present, the last variable will the objective of the original problem.
+        if (numGEQ > 0) {
+            varNames[numBaseVar + numConstr + numGEQ] = "ORIG_OBJ_FUNC";
+        }
+
+        //Now populate the talbleau body.
+        //First, the original A matrix.
+        size_t numEQEncountered = 0;
         for (size_t i = 0; i < initA.size(); i++) {
-            size_t ii = i / numVar;
-            size_t jj = i - ii * numVar;
+            //First, find the 2-D indices of the original A matrix.
+            size_t ii = i / numVar; //Constraint Index
+            size_t jj = i - ii * numVar; //Variable Index
+
+            //Now map those 2-D indices to the 2-D indices of the tableau.
+            //jj remains the same since original variables come first in variable order
+            //ii remains the same except it is repeated if a constraint is an equality constraint. 
+            bool thisIsAnEQConstr = constrTypes[ii] == CONSTR_EQ;
+
+            //Thus, we need to shift ii forward the number of equality constraints we already encountered.
+            ii += numEQEncountered;
 
             size_t j = ii * tableauWidth + jj;
             tableauBody[j] = initA[i];
+
+            if (thisIsAnEQConstr) {
+                //Repeat this value on the next row if this is an EQConstr.
+                ii++;
+                j = ii * tableauWidth + jj;
+                tableauBody[j] = initA[i];
+            }
+
+            //Only iterate numEQEncountered after we've totally finished a given row.
+            if ((jj == initNumVar - 1) && (thisIsAnEQConstr)) {
+                numEQEncountered++;
+            }
         }
 
-        size_t rightColIndex = tableauWidth - 1;
+        //Now Fill in the Constant Column
+        numEQEncountered = 0;
         for (size_t i = 0; i < numConstr; i++) {
-            tableauBody[rightColIndex] = initB[i];
+            //First, find the index of the original. This is i.
+            //Then, map that index onto the indices of the tableau.
+            size_t j = (i + numEQEncountered) * tableauWidth
+            tableauBody[j] = initB[i];
 
-            rightColIndex += tableauWidth;
-        }
-
-        size_t bottomRowIndex = tableauWidth * numConstr;
-        for (size_t i = 0; i < tableauWidth; i++) {
-            if (i == tableauWidth - 1) {
-                tableauBody[i + bottomRowIndex] = initC[i];
-            }
-            else{
-                tableauBody[i + bottomRowIndex] = -initC[i];
+            //If this constr is an EQ constr, repeat it's value on the next tableau row.
+            bool thisIsAnEQConstr = constrTypes[ii] == CONSTR_EQ;
+            if (thisIsAnEQConstr) {
+                j += tableauWidth;
+                tableauBody[j] = initB[i];
             }
         }
 
-        basisVars = NULL;
+        //Now fill in the slack variable values.
+        //LEQ constraints have a 1 in the diagonal and 0s everywhere else
+        TODO
 
+        //GEQ constraints have a -1 in the diagonal and 0s everywhere else
+        TODO
+
+        //Now fill in the art. var. values.
+        //LEQ constraints have zeros everywhere
+        TODO
+
+        //GEQ constraints have a 1 in the "diagonal" and zeros everywhere else
+        TODO
+
+        //Now fill in the objective function row.
+        //This behaves differently if we need to solve the auxilary problem first or not.
         bottomRowStart = tableauWidth * numConstr;
         bottomRowEnd = bottomRowStart + numVar;
 
         lastColStart = tableauWidth - 1;
         lastColEnd = tableauHeight * tableauWidth;
+
+        if (auxProblemSolved) {
+            //The bottom row will be the original objective function.
+
+            //The first entries will correspond to the original values. (But Negative)
+            for (size_t i = 0; i < numBaseVar; i++) {
+                tableauBody[i + bottomRowStart] = -initC[i];
+            }
+            //The obj value will be put in the appropriate place.
+            tableauBody[bottomRowEnd-1] = initC[numBaseVar-1];
+
+            //The rest of the obj function row will be zeros.
+            for (size_t i = 0; i < numLEQ; i++) {
+                tableauBody[i + bottomRowStart + numBaseVar] = 0;
+            }
+        }
+        else {
+            //The bottom-most row will be the auxilary objective function.
+
+            //We want to minimize the art. vars. but since that objective function and associated minimiation is problematic, we'll solve for the equivalent objective coefs.
+            //  For an example, see 10:10 of https://www.youtube.com/watch?v=-RtEzwfMqxk&list=PLg2tfDG3Ww4vyVtIvTUY2JaOZDbQStcsb&index=8
+            //The first coefs will be the sum of the A matrix columns
+            TODO
+
+            //The Slack variable columns will be -1 if the associated constraint is a leq constraint, 0 otherwise.
+            TODO
+
+            //The art. var. columns will be 0
+            TODO
+
+            //The original objective variable will have a value of zero
+            TODO
+
+            //The constant column will be the sum of the original constant column
+            TODO
+
+
+            //The next row up will be the original objective function. 
+            //The first columns correspond to the original variables. (Made negative since P - Coefs = Const)
+            TODO
+
+            //The constant column is the same.
+            TODO
+
+            //The original objective variable has a coef of 1.
+            TODO
+
+            //All other variables have a coef of 0.
+            TODO
+        }
 
         pointerOwnership = true;
 
@@ -177,7 +314,7 @@ public:
         modelEngaged = true;
     }
 
-    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, size_t initNumSlackRelationships, std::pair<size_t,size_t>* initSlackRelationships, int* initBasisVars = NULL, std::string* initVarNames = NULL, bool transferOwnership = false) {
+    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, std::string* initVarNames = NULL, bool transferOwnership = false) {
         if (modelEngaged) {
             DisengageModel();
         }
@@ -195,10 +332,6 @@ public:
             }
         }
 
-        numSlackRelationships = initNumSlackRelationships;
-        slackRelationships = initSlackRelationships;
-
-        basisVars = initBasisVars;
         tableauHeight = numConstr + 1;
         tableauWidth = numVar + 1;
 
@@ -229,6 +362,7 @@ public:
 
             tableauBody = NULL;
             numVar = 0;
+            numBaseVar = 0;
             numConstr = 0;
             varNames = NULL;
             basisVars = NULL;
@@ -504,20 +638,90 @@ public:
         return std::chrono::duration_cast<second_>(clock_::now() - tic_time).count();
     }
 
-    bool GetOptimalityStatus() {
+    bool GetOptimalityStatus(bool maximize) {
         bool optimal = true;
-        for (size_t i = bottomRowStart; i < bottomRowEnd; i++) {
-            if (LessThanZero(tableauBody[i])) {
-                optimal = false;
-                break;
+        if (maximize) {
+            for (size_t i = bottomRowStart; i < bottomRowEnd; i++) {
+                if (LessThanZero(tableauBody[i])) {
+                    optimal = false;
+                    break;
+                }
+            }
+        }
+        else {
+            for (size_t i = bottomRowStart; i < bottomRowEnd; i++) {
+                if (GreaterThanZero(tableauBody[i])) {
+                    optimal = false;
+                    break;
+                }
             }
         }
         return optimal;
     }
 
-    virtual size_t ComputePivotColumn() = 0;
+    size_t ComputePivotColumn(bool maximize) {
+        size_t columnIndex = 0;
+        if (maximize) {
+            Scalar minBottomVal = tableauBody[bottomRowStart];
+            size_t i = bottomRowStart + 1;
+            for (size_t j = 1; j < numVar; i++, j++) {
+                if (tableauBody[i] < minBottomVal) {
+                    minBottomVal = tableauBody[i];
+                    columnIndex = j;
+                }
+            }
+        }
+        else {
+            Scalar maxBottomVal = tableauBody[bottomRowStart];
+            size_t i = bottomRowStart + 1;
+            for (size_t j = 1; j < numVar; i++, j++) {
+                if (tableauBody[i] > maxBottomVal) {
+                    maxBottomVal = tableauBody[i];
+                    columnIndex = j;
+                }
+            }
+        }
 
-    virtual size_t ComputePivotRow(size_t pivotCol) = 0;
+        return columnIndex;
+    }
+
+    size_t ComputePivotRow(size_t pivotCol) {
+        size_t rowIndex = 0;
+
+        size_t lastColIndex = lastColStart;
+        size_t pivotColIndex = pivotCol;
+        Scalar minComparisonVal;
+        if (LessThanZero(tableauBody[pivotColIndex])) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
+            minComparisonVal = SCALAR_INF; 
+        }
+        else {
+            minComparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+        }
+
+        lastColIndex += tableauWidth;
+        pivotColIndex += tableauWidth;
+        for (size_t j = 1; j < numConstr; j++, lastColIndex += tableauWidth, pivotColIndex += tableauWidth) {
+            if (EqualsZero(tableauBody[pivotColIndex])) {
+                continue; //This will return an infinite result which, under no circumstances, is the best.
+            }
+            if (LessThanZero(tableauBody[pivotColIndex])) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
+                continue;
+            }
+            
+            Scalar comparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+
+            if (comparisonVal < minComparisonVal) {
+                rowIndex = j;
+                minComparisonVal = comparisonVal;
+            }
+        }
+
+        if (minComparisonVal == SCALAR_INF) {
+            throw UNBOUNDED_FLAG;
+        }
+
+        return rowIndex;
+    }
 
     void PerformPivot(const size_t& pivotCol, const size_t& pivotRow) {
         //Step 1: Divide the pivot row by the pivot value
@@ -611,7 +815,7 @@ public:
         std::cout << "Itr: " << FormatSizeT(itr,10) << " Time: " << FormatScalar(time,15) << " Objective Value: " << GetObjectiveValue() << '\n';
     }
 
-    size_t SolveInitProblemWithSolver(SimplexSolver& otherSolver, bool enableVariableNames_InitProblem = false) {
+    size_t SolveInitProblemWithSolver() {
         //NOTES ON STUFF TO FIX:
         // For each Constraint, add a artif. var. If the coef. if neg. put -1 as the coef for the art. var.
         // If the coef. is positive put 1 as the art. var. coef.
@@ -741,41 +945,16 @@ public:
         return otherIterations;
     }
 
-    virtual size_t SolveInitProblem() = 0; //Must be specified in each subclass since an instance of that subclass is needed to solve the initial problem.
-
-    size_t Solve() {
+    size_t SolveCurrentSetup(bool maximize, size_t& iterationNum, size_t& liveUpdateIterCounter, size_t& liveUpdateTimeCounter) {
         //Make sure model is engaged before proceeding
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
 
-        //Make sure basis is complete. If not, run pre-solve.
-        bool basisIsGiven = basisVars != NULL;
 
-        size_t iterationNum = 0;
-        tic();
-        if (!basisIsGiven) {
-            try{
-                std::cout << "SOLVING AUXILARY PROBLEM:\n";
-                iterationNum += SolveInitProblem();
-                std::cout << "AUXILARY PROBLEM COMPLETE:\n";
-            }
-            catch (const int& e) {
-                switch (e) {
-                    case INFEASIBLE_FLAG:
-                        ASSERT(false,"The Model was proven to be infeasible.");
-                    default:
-                        throw e;
-                }
-            }
-        }
-
-
-        bool solutionIsOptimal = GetOptimalityStatus();
+        bool solutionIsOptimal = GetOptimalityStatus(maximize);
 
         
         size_t exitCode = 0;
 
-        size_t liveUpdateIterCounter = 0;
-        size_t liveUpdateTimeCounter = 0;
         std::cout << TableauToTerminalString() << "\n";
         while (!solutionIsOptimal) {
             if (iterationNum > maxIter) {
@@ -803,7 +982,7 @@ public:
                 }
             }
 
-            size_t pivotCol = ComputePivotColumn();
+            size_t pivotCol = ComputePivotColumn(maximize);
             size_t pivotRow;
             try {
                 pivotRow = ComputePivotRow(pivotCol);
@@ -818,7 +997,7 @@ public:
             }
             PerformPivot(pivotCol,pivotRow);
 
-            solutionIsOptimal = GetOptimalityStatus();
+            solutionIsOptimal = GetOptimalityStatus(maximize);
 
             std::cout << TableauToTerminalString() << "\n";
         }
@@ -830,70 +1009,32 @@ public:
         log(LOG_INFO,std::to_string(iterationNum) + " iterations");
         log(LOG_INFO,std::to_string(toc()) + " seconds");
         log(LOG_INFO,"Best Found Objective Function Value: " + std::to_string(GetObjectiveValue()));
-
-        return iterationNum;
-    }
-};
-
-class SimplexSolver_RC: public SimplexSolver {
-private:
-public:
-    size_t ComputePivotColumn() {
-        size_t columnIndex = 0;
-        Scalar minBottomVal = tableauBody[bottomRowStart];
-
-        size_t i = bottomRowStart + 1;
-        for (size_t j = 1; j < numVar; i++, j++) {
-            if (tableauBody[i] < minBottomVal) {
-                minBottomVal = tableauBody[i];
-                columnIndex = j;
-            }
-        }
-
-        return columnIndex;
     }
 
-    size_t ComputePivotRow(size_t pivotCol) {
-        size_t rowIndex = 0;
+    size_t Solve() {
+        size_t iterationNum = 0;
+        size_t liveUpdateIterCounter = 0;
+        size_t liveUpdateTimeCounter = 0;
 
-        size_t lastColIndex = lastColStart;
-        size_t pivotColIndex = pivotCol;
-        Scalar minComparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+        if (!auxProblemSolved) {
+            SolveCurrentSetup(false,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
 
-        if (LessThanZero(minComparisonVal)) { 
-            minComparisonVal = SCALAR_INF; // Since we're only interested in the smallest positive value.
+            //Assert that the auxilary problem was solved to optimality. Otherwise abort.
+            TODO
+
+            //Chop off the Auxilary Objective Function Row and all artificial variable / objective function columns
+            //  In the Tableau
+            TODO
+
+            //  And in the variable name list
+            TODO
+
+            //Update all the tableau size constants (numVar, tableaWidth, etc.)
+            TODO
         }
 
-        lastColIndex += tableauWidth;
-        pivotColIndex += tableauWidth;
-        for (size_t j = 1; j < numConstr; j++, lastColIndex += tableauWidth, pivotColIndex += tableauWidth) {
-            if (EqualsZero(tableauBody[pivotColIndex])) {
-                continue; //This will return an infinite result which, under no circumstances, is the best.
-            }
-            
-            Scalar comparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
-            
-
-            if (LessThanZero(comparisonVal)) { // Since we're only interested in the smallest positive value.
-                continue;
-            }
-
-            if (comparisonVal < minComparisonVal) {
-                rowIndex = j;
-                minComparisonVal = comparisonVal;
-            }
-        }
-
-        if (minComparisonVal == SCALAR_INF) {
-            throw UNBOUNDED_FLAG;
-        }
-
-        return rowIndex;
-    }
-
-    size_t SolveInitProblem() {
-        SimplexSolver_RC otherSolver;
-        return SolveInitProblemWithSolver(otherSolver,true);
+        //Now that the auxilary problem is sovled, the tableau is ready to be solved normally.
+        SolveCurrentSetup(maximizationProblem,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
     }
 };
 
@@ -903,16 +1044,16 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
     handle.doc() = "The C++ implementation of Nathan's Simplex Solver.\n To operate, instantiate a SimplexSolver object by passing the following as arguments: numVar, numConstr, varNames, the A matrix (flattened using A.flatten() or A.flatten('C')), the b vector, the vector.\nThen specify any neccecary solver options.\nThen execute the solving operation using the Solve() method.";
     handle.def("DummyFunc", &DummyFunc);
 
-    py::class_<SimplexSolver_RC>(handle, "SimplexSolver_RC")
+    py::class_<SimplexSolver>(handle, "SimplexSolver")
         .def(py::init<>())
-        .def("EngageModel", static_cast<void (SimplexSolver_RC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<std::pair<size_t,size_t>>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&)>(&SimplexSolver_RC::EngageModel))
-        .def("Solve", &SimplexSolver_RC::Solve)
-        .def("TableauToString", &SimplexSolver_RC::TableauToString)
-        .def("setMaxIter",&SimplexSolver_RC::setMaxIter)
-        .def("setMaxTime",&SimplexSolver_RC::setMaxTime)
-        .def("GetLogs",&SimplexSolver_RC::GetLogs)
-        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_RC::*)(std::string)>(&SimplexSolver_RC::GetVariableValue))
-        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_RC::*)(size_t)>(&SimplexSolver_RC::GetVariableValue))
-        .def("GetObjectiveValue",&SimplexSolver_RC::GetObjectiveValue)
-        .def("SetLiveUpdateSettings",&SimplexSolver_RC::SetLiveUpdateSettings);
+        .def("EngageModel", static_cast<void (SimplexSolver::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<std::pair<size_t,size_t>>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&)>(&SimplexSolver::EngageModel))
+        .def("Solve", &SimplexSolver::Solve)
+        .def("TableauToString", &SimplexSolver::TableauToString)
+        .def("setMaxIter",&SimplexSolver::setMaxIter)
+        .def("setMaxTime",&SimplexSolver::setMaxTime)
+        .def("GetLogs",&SimplexSolver::GetLogs)
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver::*)(std::string)>(&SimplexSolver::GetVariableValue))
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver::*)(size_t)>(&SimplexSolver::GetVariableValue))
+        .def("GetObjectiveValue",&SimplexSolver::GetObjectiveValue)
+        .def("SetLiveUpdateSettings",&SimplexSolver::SetLiveUpdateSettings);
 }

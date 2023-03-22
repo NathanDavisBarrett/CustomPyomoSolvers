@@ -129,33 +129,18 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
         constrExpressions = [str(constr.expr) for constr in modelData._con]
 
-        #Add Slack Variables
-        slackIndex = 0
-        slackVarBase = "SLACK_VAR"
-        while not all([slackVarBase not in varName for varName in varNames]): #Make sure the slack var name is unique.
-            slackVarBase += random.choice(string.ascii_letters)
-
-        slackAdditions = [None for constr in constrExpressions]
-        slackRelationships = []
+        constrEQ = 0
+        constrLEQ = 1
+        constrGEQ = 2
+        constrTypes = np.zeros(len(constrExpressions),dtype=int)
 
         for i in range(len(constrExpressions)):
             if "<=" in constrExpressions[i]:
-                newSlackVar = slackVarBase + "[{}]".format(slackIndex)
-                varNames.append(newSlackVar)
-                slackIndex += 1
-
-                slackAdditions[i] = (1,newSlackVar)
-                varIDs[newSlackVar] = len(varNames) - 1
-                slackRelationships.append((len(varNames) - 1, i))
-
+                constrTypes[i] = constrLEQ
             elif ">=" in constrExpressions:
-                newSlackVar = slackVarBase + "[{}]".format(slackIndex)
-                varNames.append(newSlackVar)
-                slackIndex += 1
-
-                slackAdditions[i] = (-1,newSlackVar)
-                varIDs[newSlackVar] = len(varNames) - 1
-                slackRelationships.append((len(varNames) - 1, i))
+                constrTypes[i] = constrGEQ
+            else:
+                constrTypes[i] = constrEQ
                 
 
         #Assemble Matrices
@@ -174,10 +159,14 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             varData = leftData[0] - rightData[0]
             constData = rightData[1] - leftData[1]
 
-            if slackAdditions[i] != None:
-                contribution, varName = slackAdditions[i]
-                varIndex = varNames.index(varName)
-                varData[varIndex] = contribution
+            if constData < 0:
+                #Standard form has no negative in the constant column
+                constData *= -1
+                varData *= -1
+                if constrTypes[i] == constrLEQ:
+                    constrTypes[i] = constrGEQ:
+                elif constrTypes[i] == constrGEQ:
+                    constrTypes[i] = constrLEQ
 
             A[i,:] = varData
             b[i] = constData
@@ -203,7 +192,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         if self.currentOptions["LiveUpdate"]:
             solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
 
-        solver.EngageModel(numVar,numConstr,varNames,slackRelationships,A.flatten(),b,c)
+        solver.EngageModel(numVar,numConstr,varNames,b,c,constrTypes)
         solver.Solve()
 
         logs = solver.GetLogs()
