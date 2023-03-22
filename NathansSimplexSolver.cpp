@@ -612,6 +612,11 @@ public:
     }
 
     size_t SolveInitProblemWithSolver(SimplexSolver& otherSolver, bool enableVariableNames_InitProblem = false) {
+        //NOTES ON STUFF TO FIX:
+        // For each Constraint, add a artif. var. If the coef. if neg. put -1 as the coef for the art. var.
+        // If the coef. is positive put 1 as the art. var. coef.
+        // Then, for the obj. func. values sum up the non-art. var. coefs and multiply by negatvie one as shown here: https://www.youtube.com/watch?v=-RtEzwfMqxk&list=PLg2tfDG3Ww4vyVtIvTUY2JaOZDbQStcsb&index=8
+
         if (basisVars == NULL) {
             ASSERT(pointerOwnership,"Error! It's unclear how to deal with a NULL basis that we don't have ownership of.");
             basisVars = new int[numConstr];
@@ -619,32 +624,10 @@ public:
         otherSolver.setMaxIter(maxIter);
         otherSolver.setMaxTime(maxTime);
 
-        size_t numArtificialVars = numConstr - numSlackRelationships;
-        std::pair<size_t,size_t>* artificialRelationships = new std::pair<size_t,size_t>[numArtificialVars];
-        if (numArtificialVars > 0) {
-            size_t artificialI = 0;
-            bool* constrHandled = new bool[numConstr];
-            for (size_t constrI = 0; constrI < numConstr; constrI++) {
-                constrHandled[constrI] = false;
-            }
-            for (size_t relI = 0; relI < numSlackRelationships; relI++) {
-                size_t constrI = slackRelationships[relI].second;
-                constrHandled[constrI] = true;
-            }
+        //Add an artificial variable to each constraint
+        size_t numArtificialVars = numConstr;
 
-            for (size_t constrI = 0; constrI < numConstr; constrI++) {
-                if (!constrHandled[constrI]) {
-                    artificialRelationships[artificialI] = std::make_pair(numVar + artificialI, constrI);
-                    artificialI++;
-                }
-            }
-
-            ASSERT(artificialI == numArtificialVars,"Error! There must be a logic error here!");
-
-            delete[] constrHandled;
-        }
-
-        size_t numAuxVars = numArtificialVars + 1; //Artificial variables plus one feasibility variable
+        size_t numAuxVars = numArtificialVars;
         size_t otherNumVars = numVar + numAuxVars;
         Scalar* otherTableau = new Scalar[(otherNumVars + 1) * (numConstr + 1)];
 
@@ -667,55 +650,34 @@ public:
                 size_t otherIndex = i * otherTableauWidth + j;
                 otherTableau[otherIndex] = tableauBody[myIndex];
             }
-
-            //Feasibility Variable Coef
-            otherTableau[(i + 1) * otherTableauWidth - 2] = -1;
         }
         //Artificial Variable Coefs
         for (size_t i = 0; i < numArtificialVars; i++) {
-            size_t varI = artificialRelationships[i].first;
+            size_t varI = numVar + i;
             for (size_t j = 0; j < numConstr; j++) {
-                otherTableau[j * otherTableauWidth + varI] = 0;
+                if (i == j) {
+                    otherTableau[j * otherTableauWidth + varI] = -1;
+                }
+                else {
+                    otherTableau[j * otherTableauWidth + varI] = 0;
+                }
             }
-            size_t constrI = artificialRelationships[i].second;
-            otherTableau[constrI * otherTableauWidth + varI] = -1;
         }
 
-        //Now go through and specify new objective row (to minimize all aux variables)
-        //Since this is a minimization problem, the obj coefs will be multiplied by negative 1.
-        //Note this this makes an apparently "optimal" solution. In order to counteract this, we'll
-        //  perform one "Forced Pivot" injecting the feasibility variable into the basis. The optimization
-        //  will then (hopefully) push the feasibility variable out of the basis and, by doing so, finding
-        //  the true optimal solution. See https://www.matem.unam.mx/~omar/math340/2-phase.html
-        for (size_t i = 0; i < otherTableauWidth; i++) {
+        //Now go through and specify new objective row (to minimize all auxilary variables)
+        for (size_t i = 0; i < numVar; i++) {
             otherTableau[otherTableauWidth * numConstr + i] = 0;
         }
-
-        otherTableau[otherTableauWidth * otherTableauHeight - 2] = 1;
-
-        for (size_t i = 0; i < numArtificialVars; i++) {
-            size_t varI = artificialRelationships[i].first;
-            otherTableau[otherTableauWidth * (otherTableauHeight - 1) + varI] = 1;
+        for (size_t i = numVar; i < otherNumVars; i++) {
+            otherTableau[otherTableauWidth * numConstr + i] = 1;
         }
+        otherTableau[otherTableauHeight * otherTableauWidth - 1] = 0;
 
         //Now specify a initial basis.
         //Since the Aux valriables can be whatever, We'll specify that the original variables must be zero.
-        //i.e. The initial basis must consist of just the slack and artificial variables.
-        for (size_t i = 0; i < numConstr; i++) {
-            basisVars[i] = -1;
-        }
-        for (size_t i = 0; i < numSlackRelationships; i++){
-            size_t varI = slackRelationships[i].first;
-            size_t constrI = slackRelationships[i].second;
-            basisVars[constrI] = static_cast<int>(varI);
-        }
+        //  i.e. The initial basis must consist of just the artificial variables.
         for (size_t i = 0; i < numArtificialVars; i++) {
-            size_t varI = artificialRelationships[i].first;
-            size_t constrI = artificialRelationships[i].second;
-            basisVars[constrI] = static_cast<int>(varI);
-        }
-        for (size_t i = 0; i < numConstr; i++) {
-            ASSERT(basisVars[i] != -1,"Error! Other Basis was not initialized properly!");
+            basisVars[i] = numVar + i;
         }
 
         //Engage Model
@@ -728,7 +690,6 @@ public:
             for (size_t i = 0; i < numArtificialVars; i++) {
                 otherVarNames[i + numVar] = "ARTIF_VAR[" + std::to_string(i) + "]";
             }
-            otherVarNames[otherNumVars - 1] = "FEASI_VAR";
         }
         otherSolver.EngageModel(otherNumVars,numConstr,otherTableau,numSlackRelationships,slackRelationships,basisVars,otherVarNames,false);
         if (enableLiveUpdates) {
@@ -736,26 +697,10 @@ public:
         }
 
         //Perform Forced Pivot
-        //Select the constraint with the most negative constant value to be the pivot row.
-        size_t forceRow = 0;
-        Scalar forceVal = otherTableau[otherTableauWidth-1];
-        if (forceVal < 0) {
-            forceVal *= -1;
-        }
-        for (size_t i = 1; i < numConstr; i++) {
-            Scalar val = otherTableau[otherTableauWidth * (i+1) - 1];
-            if (val < 0) {
-                val *= -1;
-            }
-
-            if (val > forceVal) {
-                forceVal = val;
-                forceRow = i;
-            }
-        }
-
         std::cout << otherSolver.TableauToTerminalString() << "\n";
-        otherSolver.PerformPivot(otherTableauWidth - 2, forceRow);
+        size_t forcePivotCol = 0;
+        size_t forcePivotRow = otherSolver.ComputePivotRow(forcePivotCol);
+        otherSolver.PerformPivot(forcePivotCol,forcePivotRow);
 
         //Sove regularly
         size_t otherIterations = otherSolver.Solve();
@@ -773,26 +718,13 @@ public:
         //Check Feasibility
         //In order to be feasible, the feasibility variable and all artificial variables must be absent from the basis.
         bool feasible = true;
-        size_t feasibilityVariableIndex = otherNumVars - 1;
         for (size_t i = 0; i < numConstr; i++) {
-            if (basisVars[i] == feasibilityVariableIndex) {
+            if (basisVars[i] >= numVar) {
                 feasible = false;
                 break;
             }
         }
-        if (feasible) {
-            for (size_t i = 0; i < numArtificialVars; i++) {
-                size_t artVarIndex = artificialRelationships[i].first;
-                for (size_t j = 0; j < numConstr; j++) {
-                    if (basisVars[j] == artVarIndex) {
-                        feasible = false;
-                        break;
-                    }
-                }
-            }
-        }
 
-        delete[] artificialRelationships;
         delete[] otherTableau;
 
         if (!feasible) {
