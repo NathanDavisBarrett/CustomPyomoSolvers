@@ -34,16 +34,18 @@ model.y = pyo.Var(range(2),domain=pyo.NonNegativeReals)#Binary)
 model.c1 = pyo.Constraint(expr=  model.x[0]                               + 13.2 * model.y[0] - 0.001 * model.y[1] <= 1 )
 model.c2 = pyo.Constraint(expr=4*model.x[0] +   model.x[1] + 6*model.x[2] - 43.1 * model.y[0] + 5.2  * model.y[1] <= 6 )
 model.c3 = pyo.Constraint(expr=8*model.x[0] + 4*model.x[1] +   model.x[2]                     + 7    * model.y[1] <= 36)
-model.c4 = pyo.Constraint(expr= model.x[0] == 1.2 * model.y[0] + 0.01 * model.y[1])
+model.c4 = pyo.Constraint(expr= model.x[0] == 1.2 * model.y[0] + 0.01 * model.y[1] + 1.0)
 
-model.objFunc = pyo.Objective(expr=4 * model.x[0] + 2 * model.x[1] + model.x[2])
+model.objFunc = pyo.Objective(expr=4 * model.x[0] + 2 * model.x[1] + model.x[2], sense = pyo.maximize)
 
 solver = pyo.SolverFactory('NathansSimplexSolver')
-#solver = pyo.SolverFactory('gurobi')
 solver.options = {
     "LiveUpdateTime": 10,
     "maxIter": 25
 }
+
+# solver = pyo.SolverFactory('gurobi')
+
 solver.solve(model).write()
 
 #model.objFunc.display()

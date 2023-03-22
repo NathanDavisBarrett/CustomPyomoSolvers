@@ -11,6 +11,7 @@
 #include<chrono> //time_point
 #include<utility> //pair
 #include<map> //map
+#include<cmath> //signbit
 
 #include <unistd.h> //sleep
 
@@ -30,7 +31,6 @@
     } while (false)
 
 
-
 namespace py = pybind11;
 
 using Scalar = double;
@@ -48,6 +48,8 @@ protected:
     size_t numVar = 0;
     size_t numConstr = 0;
     std::string* varNames = NULL;
+    size_t numSlackRelationships;
+    std::pair<size_t,size_t>* slackRelationships; //(variableIndex, constrIndex)
     std::map<std::string, size_t> varIDs;
     int* basisVars = NULL;
     size_t tableauHeight = 0;
@@ -73,6 +75,9 @@ protected:
     Scalar liveUpdateTime = 0;
 
     std::vector<std::pair<size_t, std::string>> logs;
+
+    static const int UNBOUNDED_FLAG = 001;
+    static const int INFEASIBLE_FLAG = 002;
     
 public:
     SimplexSolver() {
@@ -99,6 +104,7 @@ public:
         size_t& initNumVar,
         size_t& initNumConstr,
         std::vector<std::string>& initVarNames,
+        std::vector<std::pair<size_t,size_t>>& initSlackRelationships,
         std::vector<Scalar>& initA,
         std::vector<Scalar>& initB,
         std::vector<Scalar>& initC
@@ -122,6 +128,12 @@ public:
         }
         enableVariableNames = true;
 
+        numSlackRelationships = initSlackRelationships.size();
+        slackRelationships = new std::pair<size_t,size_t>[numSlackRelationships];
+        for (size_t i = 0; i < numSlackRelationships; i++) {
+            slackRelationships[i] = initSlackRelationships[i];
+        }
+
         tableauHeight = numConstr + 1;
         tableauWidth = numVar + 1;
         tableauBody = new Scalar[tableauWidth * tableauHeight];
@@ -137,6 +149,7 @@ public:
         size_t rightColIndex = tableauWidth - 1;
         for (size_t i = 0; i < numConstr; i++) {
             tableauBody[rightColIndex] = initB[i];
+
             rightColIndex += tableauWidth;
         }
 
@@ -164,7 +177,7 @@ public:
         modelEngaged = true;
     }
 
-    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, int* initBasisVars = NULL, std::string* initVarNames = NULL, bool transferOwnership = false) {
+    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, size_t initNumSlackRelationships, std::pair<size_t,size_t>* initSlackRelationships, int* initBasisVars = NULL, std::string* initVarNames = NULL, bool transferOwnership = false) {
         if (modelEngaged) {
             DisengageModel();
         }
@@ -181,6 +194,10 @@ public:
                 varIDs[varNames[i]] = i;
             }
         }
+
+        numSlackRelationships = initNumSlackRelationships;
+        slackRelationships = initSlackRelationships;
+
         basisVars = initBasisVars;
         tableauHeight = numConstr + 1;
         tableauWidth = numVar + 1;
@@ -190,6 +207,8 @@ public:
 
         lastColStart = tableauWidth - 1;
         lastColEnd = tableauHeight * tableauWidth;
+
+        pointerOwnership = transferOwnership;
 
         modelEngaged = true;
         modelOptimized = false;
@@ -205,6 +224,7 @@ public:
                 if (basisVars != NULL) {
                     delete[] basisVars;
                 }
+                delete[] slackRelationships;
             }
 
             tableauBody = NULL;
@@ -217,6 +237,7 @@ public:
             varIDs.clear();
             pointerOwnership = false;
             enableVariableNames = false;
+            numSlackRelationships = 0;
 
             modelOptimized = false;
             modelEngaged = false;
@@ -334,7 +355,13 @@ public:
     }
 
     std::string FormatString(const std::string& str, size_t width) {
-        size_t numSpaces = width - str.length();
+        size_t numSpaces;
+        if (width < str.length()) {
+            numSpaces = 0; //Otherwise the will silently overflow since size_t can't be negative.
+        }
+        else {
+            numSpaces = width - str.length();
+        }
         size_t numFirstHalf = numSpaces / 2;
         size_t numSecondHalf = numSpaces - numFirstHalf;
 
@@ -353,15 +380,21 @@ public:
         std::stringstream ss;
         ss.precision(precision);
         bool addNeg = false;
-        if (num < 0) {
-            ss << -num;
-            addNeg = true;
+        if (std::signbit(num)) {
+            if (num == 0) {
+                ss << -num;
+                addNeg = false;
+            }
+            else {
+                ss << -num;
+                addNeg = true;
+            }
         }
         else{
             ss << num;
         }
-        std::string str = FormatString(ss.str(),width);
 
+        std::string str = FormatString(ss.str(),width);
         if (addNeg) {
             size_t startIndex = -1;
             for (size_t i = 0; i < str.length(); i++) {
@@ -398,6 +431,15 @@ public:
                 cellWidth = varNames[i].length() + 2;
             }
         }
+        for (size_t i = 0; i < tableauHeight * tableauWidth; i++) {
+            std::stringstream ss;
+            ss.precision(6);
+            ss << tableauBody[i];
+            std::string str = ss.str();
+            if (str.length() + 2 > cellWidth) {
+                cellWidth = str.length() + 2;
+            }
+        }
 
         const std::string vertBar = " | ";
         const std::string horiBar(cellWidth * (tableauWidth + 1) + 2 * vertBar.length(), '-');
@@ -429,6 +471,7 @@ public:
         }
         ss << vertBar << FormatScalar(tableauBody[tableauWidth * tableauHeight - 1],cellWidth) << "\n";
 
+        
         if (!enableVariableNames) {
             delete[] varNames;
         }
@@ -438,6 +481,10 @@ public:
 
     bool LessThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
         return (val + tollerance) < 0.0;
+    }
+
+    bool GreaterThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
+        return (val - tollerance) > 0.0;
     }
 
     bool EqualsZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
@@ -498,8 +545,6 @@ public:
         //Step 3: Swap in the appropriate basis valriable
         basisVars[pivotRow] = pivotCol;
     }
-    
-    virtual void Solve() = 0;
 
     Scalar GetVariableValue(std::string varName) {
         ASSERT(enableVariableNames,"Error! You cannot get the variable values by name when variable names are not enabled. Use GetVariableValue(size_t index) instead.");
@@ -566,82 +611,241 @@ public:
         std::cout << "Itr: " << FormatSizeT(itr,10) << " Time: " << FormatScalar(time,15) << " Objective Value: " << GetObjectiveValue() << '\n';
     }
 
-};
+    size_t SolveInitProblemWithSolver(SimplexSolver& otherSolver, bool enableVariableNames_InitProblem = false) {
+        if (basisVars == NULL) {
+            ASSERT(pointerOwnership,"Error! It's unclear how to deal with a NULL basis that we don't have ownership of.");
+            basisVars = new int[numConstr];
+        }
+        otherSolver.setMaxIter(maxIter);
+        otherSolver.setMaxTime(maxTime);
 
-class SimplexSolver_MaximizeRC: public SimplexSolver {
-private:
-public:
-    size_t ComputePivotColumn() {
-        size_t columnIndex = 0;
-        Scalar minBottomVal = tableauBody[bottomRowStart];
+        size_t numArtificialVars = numConstr - numSlackRelationships;
+        std::pair<size_t,size_t>* artificialRelationships = new std::pair<size_t,size_t>[numArtificialVars];
+        if (numArtificialVars > 0) {
+            size_t artificialI = 0;
+            bool* constrHandled = new bool[numConstr];
+            for (size_t constrI = 0; constrI < numConstr; constrI++) {
+                constrHandled[constrI] = false;
+            }
+            for (size_t relI = 0; relI < numSlackRelationships; relI++) {
+                size_t constrI = slackRelationships[relI].second;
+                constrHandled[constrI] = true;
+            }
 
-        size_t i = bottomRowStart + 1;
-        for (size_t j = 1; j < numVar; i++, j++) {
-            if (tableauBody[i] < minBottomVal) {
-                minBottomVal = tableauBody[i];
-                columnIndex = j;
+            for (size_t constrI = 0; constrI < numConstr; constrI++) {
+                if (!constrHandled[constrI]) {
+                    artificialRelationships[artificialI] = std::make_pair(numVar + artificialI, constrI);
+                    artificialI++;
+                }
+            }
+
+            ASSERT(artificialI == numArtificialVars,"Error! There must be a logic error here!");
+
+            delete[] constrHandled;
+        }
+
+        size_t numAuxVars = numArtificialVars + 1; //Artificial variables plus one feasibility variable
+        size_t otherNumVars = numVar + numAuxVars;
+        Scalar* otherTableau = new Scalar[(otherNumVars + 1) * (numConstr + 1)];
+
+        size_t otherTableauHeight = tableauHeight;
+        size_t otherTableauWidth = otherNumVars + 1;
+
+        //Load the other Tableau Coefs
+        Scalar sumConsts = 0;
+        for (size_t i = 0; i < numConstr; i++) {
+            //Constant Value:
+            size_t myIndex = (i+1) * tableauWidth - 1;
+            size_t otherIndex = (i+1) * otherTableauWidth - 1;
+            Scalar constVal = tableauBody[myIndex];
+            otherTableau[otherIndex] = constVal;
+            sumConsts += constVal;
+            
+            //Regular Var Coefs
+            for (size_t j = 0; j < numVar; j++) {
+                size_t myIndex = i * tableauWidth + j;
+                size_t otherIndex = i * otherTableauWidth + j;
+                otherTableau[otherIndex] = tableauBody[myIndex];
+            }
+
+            //Feasibility Variable Coef
+            otherTableau[(i + 1) * otherTableauWidth - 2] = -1;
+        }
+        //Artificial Variable Coefs
+        for (size_t i = 0; i < numArtificialVars; i++) {
+            size_t varI = artificialRelationships[i].first;
+            for (size_t j = 0; j < numConstr; j++) {
+                otherTableau[j * otherTableauWidth + varI] = 0;
+            }
+            size_t constrI = artificialRelationships[i].second;
+            otherTableau[constrI * otherTableauWidth + varI] = -1;
+        }
+
+        //Now go through and specify new objective row (to minimize all aux variables)
+        //Since this is a minimization problem, the obj coefs will be multiplied by negative 1.
+        //Note this this makes an apparently "optimal" solution. In order to counteract this, we'll
+        //  perform one "Forced Pivot" injecting the feasibility variable into the basis. The optimization
+        //  will then (hopefully) push the feasibility variable out of the basis and, by doing so, finding
+        //  the true optimal solution. See https://www.matem.unam.mx/~omar/math340/2-phase.html
+        for (size_t i = 0; i < otherTableauWidth; i++) {
+            otherTableau[otherTableauWidth * numConstr + i] = 0;
+        }
+
+        otherTableau[otherTableauWidth * otherTableauHeight - 2] = 1;
+
+        for (size_t i = 0; i < numArtificialVars; i++) {
+            size_t varI = artificialRelationships[i].first;
+            otherTableau[otherTableauWidth * (otherTableauHeight - 1) + varI] = 1;
+        }
+
+        //Now specify a initial basis.
+        //Since the Aux valriables can be whatever, We'll specify that the original variables must be zero.
+        //i.e. The initial basis must consist of just the slack and artificial variables.
+        for (size_t i = 0; i < numConstr; i++) {
+            basisVars[i] = -1;
+        }
+        for (size_t i = 0; i < numSlackRelationships; i++){
+            size_t varI = slackRelationships[i].first;
+            size_t constrI = slackRelationships[i].second;
+            basisVars[constrI] = static_cast<int>(varI);
+        }
+        for (size_t i = 0; i < numArtificialVars; i++) {
+            size_t varI = artificialRelationships[i].first;
+            size_t constrI = artificialRelationships[i].second;
+            basisVars[constrI] = static_cast<int>(varI);
+        }
+        for (size_t i = 0; i < numConstr; i++) {
+            ASSERT(basisVars[i] != -1,"Error! Other Basis was not initialized properly!");
+        }
+
+        //Engage Model
+        std::string* otherVarNames = NULL;
+        if (enableVariableNames_InitProblem && enableVariableNames) {
+            otherVarNames = new std::string[otherNumVars];
+            for (size_t i = 0; i < numVar; i++) {
+                otherVarNames[i] = varNames[i];
+            }
+            for (size_t i = 0; i < numArtificialVars; i++) {
+                otherVarNames[i + numVar] = "ARTIF_VAR[" + std::to_string(i) + "]";
+            }
+            otherVarNames[otherNumVars - 1] = "FEASI_VAR";
+        }
+        otherSolver.EngageModel(otherNumVars,numConstr,otherTableau,numSlackRelationships,slackRelationships,basisVars,otherVarNames,false);
+        if (enableLiveUpdates) {
+            otherSolver.SetLiveUpdateSettings(liveUpdateIter, liveUpdateTime);
+        }
+
+        //Perform Forced Pivot
+        //Select the constraint with the most negative constant value to be the pivot row.
+        size_t forceRow = 0;
+        Scalar forceVal = otherTableau[otherTableauWidth-1];
+        if (forceVal < 0) {
+            forceVal *= -1;
+        }
+        for (size_t i = 1; i < numConstr; i++) {
+            Scalar val = otherTableau[otherTableauWidth * (i+1) - 1];
+            if (val < 0) {
+                val *= -1;
+            }
+
+            if (val > forceVal) {
+                forceVal = val;
+                forceRow = i;
             }
         }
 
-        return columnIndex;
+        std::cout << otherSolver.TableauToTerminalString() << "\n";
+        otherSolver.PerformPivot(otherTableauWidth - 2, forceRow);
+
+        //Sove regularly
+        size_t otherIterations = otherSolver.Solve();
+
+        if (enableVariableNames_InitProblem && enableVariableNames) {
+            delete[] otherVarNames;
+        }
+
+        //Copy over logs
+        std::vector<std::pair<size_t,std::string>> otherLogs = otherSolver.GetLogs();
+        for (size_t i = 0; i < otherLogs.size(); i++) {
+            logs.push_back(std::make_pair(otherLogs[i].first,"AUXILARY PROBLEM: " + otherLogs[i].second));
+        }
+
+        //Check Feasibility
+        //In order to be feasible, the feasibility variable and all artificial variables must be absent from the basis.
+        bool feasible = true;
+        size_t feasibilityVariableIndex = otherNumVars - 1;
+        for (size_t i = 0; i < numConstr; i++) {
+            if (basisVars[i] == feasibilityVariableIndex) {
+                feasible = false;
+                break;
+            }
+        }
+        if (feasible) {
+            for (size_t i = 0; i < numArtificialVars; i++) {
+                size_t artVarIndex = artificialRelationships[i].first;
+                for (size_t j = 0; j < numConstr; j++) {
+                    if (basisVars[j] == artVarIndex) {
+                        feasible = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        delete[] artificialRelationships;
+        delete[] otherTableau;
+
+        if (!feasible) {
+            throw INFEASIBLE_FLAG;
+        }
+
+        //The otherSolver acted directly on this solver's basisVars object.
+        //  That, and the fact that all the non artificial/feasibility variables lie after the original variables
+        //  makes it so that the computed basis is valid for the original model as well. There is no need to
+        //  copy it over.
+
+        
+
+        return otherIterations;
     }
 
-    size_t ComputePivotRow(size_t pivotCol) {
-        size_t rowIndex = 0;
+    virtual size_t SolveInitProblem() = 0; //Must be specified in each subclass since an instance of that subclass is needed to solve the initial problem.
 
-        size_t lastRowIndex = lastColStart;
-        size_t pivotColIndex = pivotCol;
-        Scalar minComparisonVal = tableauBody[lastRowIndex] / tableauBody[pivotColIndex];
-
-        if (LessThanZero(minComparisonVal)) { 
-            minComparisonVal = SCALAR_INF; // Since we're only interested in the smallest positive value.
-        }
-
-        lastRowIndex += tableauWidth;
-        pivotColIndex += tableauWidth;
-        for (size_t j = 1; j < numConstr; j++, lastRowIndex += tableauWidth, pivotColIndex += tableauWidth) {
-            if (EqualsZero(tableauBody[pivotColIndex])) {
-                continue; //This will return an infinite result which, under no circumstances, is the best.
-            }
-            
-            Scalar comparisonVal = tableauBody[lastRowIndex] / tableauBody[pivotColIndex];
-            
-
-            if (LessThanZero(comparisonVal)) { // Since we're only interested in the smallest positive value.
-                continue;
-            }
-
-            if (comparisonVal < minComparisonVal) {
-                rowIndex = j;
-                minComparisonVal = comparisonVal;
-            }
-        }
-
-        ASSERT(minComparisonVal != SCALAR_INF, "ERROR! No positive comparison values were found in the computation of the pivot row. This indicates that the model is infeasible??");
-        ASSERT(SCALAR_INF == SCALAR_INF,"ERROR! This type of scalar comparison is not allowed! I'll need to make an \"IS_INF\" function and use it in the line above"); //FIXME
-
-        return rowIndex;
-    }
-
-    void Solve() {
+    size_t Solve() {
         //Make sure model is engaged before proceeding
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
 
         //Make sure basis is complete. If not, run pre-solve.
         bool basisIsGiven = basisVars != NULL;
 
-        ASSERT(basisIsGiven,"ERROR! I haven't coded how to handle an empty basis yet.");
+        size_t iterationNum = 0;
+        tic();
+        if (!basisIsGiven) {
+            try{
+                std::cout << "SOLVING AUXILARY PROBLEM:\n";
+                iterationNum += SolveInitProblem();
+                std::cout << "AUXILARY PROBLEM COMPLETE:\n";
+            }
+            catch (const int& e) {
+                switch (e) {
+                    case INFEASIBLE_FLAG:
+                        ASSERT(false,"The Model was proven to be infeasible.");
+                    default:
+                        throw e;
+                }
+            }
+        }
+
 
         bool solutionIsOptimal = GetOptimalityStatus();
 
-        size_t iterationNum = 0;
-        tic();
+        
         size_t exitCode = 0;
 
         size_t liveUpdateIterCounter = 0;
         size_t liveUpdateTimeCounter = 0;
+        std::cout << TableauToTerminalString() << "\n";
         while (!solutionIsOptimal) {
-            std::cout << TableauToTerminalString() << "\n";
             if (iterationNum > maxIter) {
                 exitCode = 1;
                 log(LOG_INFO,"Maximum number of Iterations Exceeded.");
@@ -668,10 +872,23 @@ public:
             }
 
             size_t pivotCol = ComputePivotColumn();
-            size_t pivotRow = ComputePivotRow(pivotCol);
+            size_t pivotRow;
+            try {
+                pivotRow = ComputePivotRow(pivotCol);
+            }
+            catch (const int& e) {
+                switch (e) {
+                    case UNBOUNDED_FLAG:
+                        log(LOG_ERROR,"The Model was proven to be unbounded.");
+                    default:
+                        throw e;
+                }
+            }
             PerformPivot(pivotCol,pivotRow);
 
             solutionIsOptimal = GetOptimalityStatus();
+
+            std::cout << TableauToTerminalString() << "\n";
         }
 
         if (exitCode == 0) {
@@ -681,23 +898,89 @@ public:
         log(LOG_INFO,std::to_string(iterationNum) + " iterations");
         log(LOG_INFO,std::to_string(toc()) + " seconds");
         log(LOG_INFO,"Best Found Objective Function Value: " + std::to_string(GetObjectiveValue()));
+
+        return iterationNum;
     }
 };
+
+class SimplexSolver_RC: public SimplexSolver {
+private:
+public:
+    size_t ComputePivotColumn() {
+        size_t columnIndex = 0;
+        Scalar minBottomVal = tableauBody[bottomRowStart];
+
+        size_t i = bottomRowStart + 1;
+        for (size_t j = 1; j < numVar; i++, j++) {
+            if (tableauBody[i] < minBottomVal) {
+                minBottomVal = tableauBody[i];
+                columnIndex = j;
+            }
+        }
+
+        return columnIndex;
+    }
+
+    size_t ComputePivotRow(size_t pivotCol) {
+        size_t rowIndex = 0;
+
+        size_t lastColIndex = lastColStart;
+        size_t pivotColIndex = pivotCol;
+        Scalar minComparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+
+        if (LessThanZero(minComparisonVal)) { 
+            minComparisonVal = SCALAR_INF; // Since we're only interested in the smallest positive value.
+        }
+
+        lastColIndex += tableauWidth;
+        pivotColIndex += tableauWidth;
+        for (size_t j = 1; j < numConstr; j++, lastColIndex += tableauWidth, pivotColIndex += tableauWidth) {
+            if (EqualsZero(tableauBody[pivotColIndex])) {
+                continue; //This will return an infinite result which, under no circumstances, is the best.
+            }
+            
+            Scalar comparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+            
+
+            if (LessThanZero(comparisonVal)) { // Since we're only interested in the smallest positive value.
+                continue;
+            }
+
+            if (comparisonVal < minComparisonVal) {
+                rowIndex = j;
+                minComparisonVal = comparisonVal;
+            }
+        }
+
+        if (minComparisonVal == SCALAR_INF) {
+            throw UNBOUNDED_FLAG;
+        }
+
+        return rowIndex;
+    }
+
+    size_t SolveInitProblem() {
+        SimplexSolver_RC otherSolver;
+        return SolveInitProblemWithSolver(otherSolver,true);
+    }
+};
+
+
 
 PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
     handle.doc() = "The C++ implementation of Nathan's Simplex Solver.\n To operate, instantiate a SimplexSolver object by passing the following as arguments: numVar, numConstr, varNames, the A matrix (flattened using A.flatten() or A.flatten('C')), the b vector, the vector.\nThen specify any neccecary solver options.\nThen execute the solving operation using the Solve() method.";
     handle.def("DummyFunc", &DummyFunc);
 
-    py::class_<SimplexSolver_MaximizeRC>(handle, "SimplexSolver_MaximizeRC")
+    py::class_<SimplexSolver_RC>(handle, "SimplexSolver_RC")
         .def(py::init<>())
-        .def("EngageModel", static_cast<void (SimplexSolver_MaximizeRC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&)>(&SimplexSolver_MaximizeRC::EngageModel))
-        .def("Solve", &SimplexSolver_MaximizeRC::Solve)
-        .def("TableauToString", &SimplexSolver_MaximizeRC::TableauToString)
-        .def("setMaxIter",&SimplexSolver_MaximizeRC::setMaxIter)
-        .def("setMaxTime",&SimplexSolver_MaximizeRC::setMaxTime)
-        .def("GetLogs",&SimplexSolver_MaximizeRC::GetLogs)
-        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_MaximizeRC::*)(std::string)>(&SimplexSolver_MaximizeRC::GetVariableValue))
-        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_MaximizeRC::*)(size_t)>(&SimplexSolver_MaximizeRC::GetVariableValue))
-        .def("GetObjectiveValue",&SimplexSolver_MaximizeRC::GetObjectiveValue)
-        .def("SetLiveUpdateSettings",&SimplexSolver_MaximizeRC::SetLiveUpdateSettings);
+        .def("EngageModel", static_cast<void (SimplexSolver_RC::*)(size_t&, size_t&,std::vector<std::string>&,std::vector<std::pair<size_t,size_t>>&,std::vector<Scalar>&,std::vector<Scalar>&,std::vector<Scalar>&)>(&SimplexSolver_RC::EngageModel))
+        .def("Solve", &SimplexSolver_RC::Solve)
+        .def("TableauToString", &SimplexSolver_RC::TableauToString)
+        .def("setMaxIter",&SimplexSolver_RC::setMaxIter)
+        .def("setMaxTime",&SimplexSolver_RC::setMaxTime)
+        .def("GetLogs",&SimplexSolver_RC::GetLogs)
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_RC::*)(std::string)>(&SimplexSolver_RC::GetVariableValue))
+        .def("GetVariableValue", static_cast<Scalar (SimplexSolver_RC::*)(size_t)>(&SimplexSolver_RC::GetVariableValue))
+        .def("GetObjectiveValue",&SimplexSolver_RC::GetObjectiveValue)
+        .def("SetLiveUpdateSettings",&SimplexSolver_RC::SetLiveUpdateSettings);
 }

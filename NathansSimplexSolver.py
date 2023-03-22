@@ -19,7 +19,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             "LiveUpdateTime": ["AnyPositiveFloat"]
         }
         self.currentOptions = {
-            "Basis_IO_Approach": "MaximizeRC",
+            "Basis_IO_Approach": "RC",
             "maxIter": np.iinfo(np.int64).max,
             "maxTime": np.inf,
             "LiveUpdate": False,
@@ -121,6 +121,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         modelData = CustomSolverResources.model_interface(model)
 
         varNames = [var.name for var in modelData._var]
+        varIDs = {varNames[i]: i for i in range(len(varNames))}
 
         for var in modelData._var:
             if not var.is_continuous():
@@ -135,6 +136,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
             slackVarBase += random.choice(string.ascii_letters)
 
         slackAdditions = [None for constr in constrExpressions]
+        slackRelationships = []
 
         for i in range(len(constrExpressions)):
             if "<=" in constrExpressions[i]:
@@ -143,6 +145,8 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 slackIndex += 1
 
                 slackAdditions[i] = (1,newSlackVar)
+                varIDs[newSlackVar] = len(varNames) - 1
+                slackRelationships.append((len(varNames) - 1, i))
 
             elif ">=" in constrExpressions:
                 newSlackVar = slackVarBase + "[{}]".format(slackIndex)
@@ -150,6 +154,8 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 slackIndex += 1
 
                 slackAdditions[i] = (-1,newSlackVar)
+                varIDs[newSlackVar] = len(varNames) - 1
+                slackRelationships.append((len(varNames) - 1, i))
                 
 
         #Assemble Matrices
@@ -183,9 +189,12 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
 
         c = np.append(recurseC[0],recurseC[1])
         
+        if modelData._obj[0].sense == pyo.minimize:
+            c *= -1
+
         #Now pass these matrices to C++        
-        if self.currentOptions["Basis_IO_Approach"] == "MaximizeRC":
-            solver = nathans_Simplex_solver_py.SimplexSolver_MaximizeRC()
+        if self.currentOptions["Basis_IO_Approach"] == "RC":
+            solver = nathans_Simplex_solver_py.SimplexSolver_RC()
             solver.setMaxIter(self.currentOptions["maxIter"])
             solver.setMaxTime(self.currentOptions["maxTime"])
         else:
@@ -194,8 +203,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         if self.currentOptions["LiveUpdate"]:
             solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
 
-
-        solver.EngageModel(numVar,numConstr,varNames,A.flatten(),b,c)
+        solver.EngageModel(numVar,numConstr,varNames,slackRelationships,A.flatten(),b,c)
         solver.Solve()
 
         logs = solver.GetLogs()
