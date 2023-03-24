@@ -238,10 +238,52 @@ public:
 
         //Now fill in the slack variable values.
         //LEQ constraints have a 1 in the diagonal and 0s everywhere else
-        TODO
-
         //GEQ constraints have a -1 in the diagonal and 0s everywhere else
-        TODO
+        numEQEncountered = 0;
+        for (size_t i = 0; i < numConstr; i++) {
+            size_t ii = i - numEQEncountered;
+            size_t constrType = constrTypes[ii];
+            if (constrType == CONSTR_EQ) {
+                for (size_t iii = 0; iii < numConstr; iii++) {
+                    if (iii == i) {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 1;
+                    }
+                    else {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
+                    }
+                }
+                i++;
+                numEQEncountered++;
+                for (size_t iii = 0; iii < numConstr; iii++) {
+                    if (iii == i) {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
+                    }
+                    else {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
+                    }
+                }
+            }
+            else if (constrType == CONSTR_LEQ) {
+                for (size_t iii = 0; iii < numConstr; iii++) {
+                    if (iii == i) {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 1;
+                    }
+                    else {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
+                    }
+                }
+            }
+            else {
+                for (size_t iii = 0; iii < numConstr; iii++) {
+                    if (iii == i) {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
+                    }
+                    else {
+                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
+                    }
+                }
+            }
+        }
 
         //Now fill in the art. var. values.
         //LEQ constraints have zeros everywhere
