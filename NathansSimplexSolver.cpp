@@ -237,60 +237,63 @@ public:
         }
 
         //Now fill in the slack variable values.
-        //LEQ constraints have a 1 in the diagonal and 0s everywhere else
-        //GEQ constraints have a -1 in the diagonal and 0s everywhere else
+        //  LEQ constraints have a 1 in the diagonal and 0s everywhere else
+        //  GEQ constraints have a -1 in the diagonal and 0s everywhere else
+        //Also we'll fill in the artificial variable values.
+        //  LEQ constraints have zeros everywhere
+        //  GEQ constraints have a 1 in the "diagonal" and zeros everywhere else
         numEQEncountered = 0;
+        numGEQEncountered = 0;
         for (size_t i = 0; i < numConstr; i++) {
             size_t ii = i - numEQEncountered;
             size_t constrType = constrTypes[ii];
             if (constrType == CONSTR_EQ) {
                 for (size_t iii = 0; iii < numConstr; iii++) {
-                    if (iii == i) {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 1;
-                    }
-                    else {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                    }
+                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
                 }
+                tableauBody[tableauWidth * i + numBaseVar + i] = 1;
+
+                for (size_t iii = 0; iii < numArtificialVars; iii++) {
+                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
+                }
+
                 i++;
                 numEQEncountered++;
+                
                 for (size_t iii = 0; iii < numConstr; iii++) {
-                    if (iii == i) {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
-                    }
-                    else {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                    }
+                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
                 }
+                tableauBody[tableauWidth * i + numBaseVar + i] = -1;
+
+                for (size_t iii = 0; iii < numArtificialVars; iii++) {
+                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
+                }
+                tableauBody[tableauWidth * i + numBaseVar + numConstr + numGEQEncountered] = 1;
+                numGEQEncountered++;
             }
             else if (constrType == CONSTR_LEQ) {
                 for (size_t iii = 0; iii < numConstr; iii++) {
-                    if (iii == i) {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 1;
-                    }
-                    else {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                    }
+                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
+                }
+                tableauBody[tableauWidth * i + numBaseVar + i] = 1;
+
+                for (size_t iii = 0; iii < numArtificialVars; iii++) {
+                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
                 }
             }
             else {
                 for (size_t iii = 0; iii < numConstr; iii++) {
-                    if (iii == i) {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
-                    }
-                    else {
-                        tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                    }
+                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
                 }
+                tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
+
+                for (size_t iii = 0; iii < numArtificialVars; iii++) {
+                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
+                }
+                tableauBody[tableauWidth * i + numBaseVar + numConstr + numGEQEncountered] = 1;
+                numGEQEncountered++;
             }
         }
-
-        //Now fill in the art. var. values.
-        //LEQ constraints have zeros everywhere
-        TODO
-
-        //GEQ constraints have a 1 in the "diagonal" and zeros everywhere else
-        TODO
 
         //Now fill in the objective function row.
         //This behaves differently if we need to solve the auxilary problem first or not.
