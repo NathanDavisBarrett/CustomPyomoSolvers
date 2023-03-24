@@ -154,7 +154,8 @@ public:
             //Solving the auxilary problem involves including the initial objective with it's function as a constraint.
             auxProblemSolved = false;
             numVar += 1;
-            numConstr += 1;
+            //numConstr += 1;
+            TODO: //VERIFY that this is implemented correctly in the next few blocks. I don't think I was accounting for the original obj func variable in the next few blocks, so I'll remove it here.
         }
         else {
             //This indicates that each of the LEQ's slack vars form the initial basis. We don't need to solve the auxilary problem
@@ -324,19 +325,50 @@ public:
             //We want to minimize the art. vars. but since that objective function and associated minimiation is problematic, we'll solve for the equivalent objective coefs.
             //  For an example, see 10:10 of https://www.youtube.com/watch?v=-RtEzwfMqxk&list=PLg2tfDG3Ww4vyVtIvTUY2JaOZDbQStcsb&index=8
             //The first coefs will be the sum of the A matrix columns
-            TODO
+            for (size_t i = 0; i < numBaseVar; i++) {
+                Scalar columnSum = 0;
+                for (size_t j = 0; j < numConstr; j++) {
+                    columnSum += tableauBody[j * tableauWidth + i];
+                }
 
-            //The Slack variable columns will be -1 if the associated constraint is a leq constraint, 0 otherwise.
-            TODO
+                tableauBody[(tableauHeight - 1) * tableauWidth + i] = columnSum;
+            }
+
+            //The Slack variable columns will be -1 if the associated constraint is a geq constraint, 0 otherwise.
+            numEQEncountered = 0;
+            for (size_t i = 0; i < numConstr; i++) {
+                if (i - numEQEncountered == CONSTR_EQ) {
+                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = 0;
+                    i++;
+                    numEQEncountered++;
+                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = -1;
+                }
+                else if (i - numEQEncountered == CONSTR_LEQ) {
+                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = 0;
+                }
+                else {
+                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = -1;
+                }
+            }
 
             //The art. var. columns will be 0
-            TODO
+            for (size_t i = 0; i < numArtificialVars; i++) {
+                tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + numConstr + i] = 0;
+            }
 
             //The original objective variable will have a value of zero
-            TODO
+            tableauBody[tableauHeight * tableauWidth - 2] = 0;
 
-            //The constant column will be the sum of the original constant column
-            TODO
+            //The constant column will be the sum of elements of the original constant column that correspond to GEQ constriants.
+            Scalar columnSum = 0;
+            numEQEncountered = 0;
+            for (size_t i = 0; i < initNumConstr; i++) {
+                if (constrTypes[i] == CONSTR_LEQ) {}
+                else {
+                    columnSum += initC[i];
+                }
+            }
+            tableauBody[tableauHeight * tableaWidth - 1] = columnSum;
 
 
             //The next row up will be the original objective function. 

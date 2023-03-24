@@ -128,6 +128,8 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 raise Exception("Error! The variable {} is not continuous. This Simplex Solver can only handle continuous variables. Did you mean to call NathansMILPSolver?")
 
         constrExpressions = [str(constr.expr) for constr in modelData._con]
+        TODO: append the variable bounds as constraints.
+        TODO: if variables are allowed to be negative, create the associated augmented variable to handle it.
 
         constrEQ = 0
         constrLEQ = 1
