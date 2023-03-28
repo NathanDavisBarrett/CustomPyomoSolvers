@@ -11,7 +11,7 @@
 #include<chrono> //time_point
 #include<utility> //pair
 #include<map> //map
-#include<cmath> //signbit
+#include<cmath> //signbit, abs
 
 #include <unistd.h> //sleep
 
@@ -41,6 +41,95 @@ float DummyFunc(float arg1, float arg2) {
 
 typedef std::chrono::high_resolution_clock clock_;
 typedef std::chrono::duration<double, std::ratio<1> > second_;
+
+#define BASIS_REDUCTION_AVG 0
+#define BASIS_REDUCTION_FIRST 1
+
+class Basis {
+public:
+    size_t size;
+    bool complete;
+
+    std::vector<Scalar> constants;
+    std::vector<std::map<size_t,Scalar>> varsAndVals;
+    std::map<size_t, std::pair<Scalar,size_t>> valsAndRows;
+
+
+    Basis(size_t initSize) {
+        size = initSize;
+        constants = std::vector<Scalar>(initSize,-1.0);
+        varsAndVals = std::vector<std::map<size_t,Scalar>>(initSize, {});
+        complete = false;
+    }
+
+    void AddEntry(size_t varIndex, size_t rowIndex, Scalar coef, Scalar constVal) {
+        constants[rowIndex] = constVal;
+        varsAndVals[rowIndex][varIndex] = coef;
+        valsAndRows[varIndex] = std::make_pair(coef,rowIndex);
+    }
+
+    bool IsInBasis(size_t varIndex) {
+        return valsAndRows.find(varIndex) != valsAndRows.end();
+    }
+
+    size_t GetRowIndex(size_t varIndex) {
+        return valsAndRows[varIndex].second;
+    }
+
+    size_t GetSolutionSpaceDimensionality(size_t rowIndex) {
+        return varsAndVals[rowIndex].size();
+    }
+
+    std::map<size_t,Scalar>& GetRow(size_t rowIndex) {
+        return varsAndVals[rowIndex];
+    }
+
+    Scalar GetVariableValue(size_t varIndex, size_t basisReductionOption = BASIS_REDUCTION_AVG) {
+        if (!IsInBasis(varIndex)) {
+            return 0.0;
+        }
+
+        size_t rowIndex = valsAndRows[varIndex].second;
+        size_t numVarsInSpace = varsAndVals[rowIndex].size();
+
+        if (numVarsInSpace == 1) {
+            return constants[rowIndex] / varsAndVals[rowIndex][0].second;
+        }
+
+        if (basisReductionOption == BASIS_REDUCTION_AVG) {
+            std::map<size_t,Scalar> coefs;
+            Scalar sum = 0;
+            for(auto itri = varsAndVals[rowIndex].begin(); itri != varsAndVals[rowIndex].end(); itri++) {
+                size_t i = itri->first;
+                coefs[i] = 0;
+                for (auto itrj = varsAndVals[rowIndex].begin(); itrj != varsAndVals[rowIndex].end(); itrj++) {
+                    size_t j = itrj->first;
+                    if (i != j) {
+                        coefs[i] += itrj->second;
+                    }
+                }
+
+                coefs[i] = 1 / coefs[i]
+                sum += coefs[i];
+            }
+
+            Scalar groupCoef = constants[rowIndex] / sum;
+
+            return coefs[varIndex] * groupCoef;
+        }
+        else if (basisReductionOption == BASIS_REDUCTION_FIRST) {
+            for(auto itr = varsAndVals[rowIndex].begin(); itr != varsAndVals[rowIndex].end(); itr++) {
+                if (itr->first < varIndex) {
+                    //This is not the first variable in this space.
+                    return 0.0;
+                }
+            }
+
+            return constants[rowIndex] / varsAndVals[rowIndex][varIndex].second;
+        }
+
+    }
+}
 
 template <typename T>
 struct BasicTableau {
@@ -139,6 +228,14 @@ public:
         return Iterator(tableauBody, row * tableauWidth, 1, (row + 1) * tableauWidth);
     }
 
+    Iterator ObjRowIterator() {
+        return RowIterator(tableauHeight - 1);
+    }
+
+    Iterator ConstColIterator() {
+        return ColumnIterator(tableauWidth - 1);
+    }
+
     T* getRawPtr() {
         return tableauBody;
     }
@@ -149,6 +246,8 @@ public:
     std::string* varNames = NULL;
     std::map<std::string, size_t> varIDs;
     bool enableVariableNames = true;
+
+    Basis* basis = NULL;
 
     Tableau(size_t initNumVar, size_t initNumConstr, std::vector<std::string> initVarNames = {}): BasicTableau<Scalar>(initNumVar, initNumConstr) {
         if (initVarNames.size() > 0) {
@@ -164,16 +263,19 @@ public:
             varNames = NULL;
         }
 
+        basis = NULL;
     }
 
     Tableau(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody): BasicTableau<Scalar>(initNumVar, initNumConstr, initTableauBody) {
         varNames = NULL;
         enableVariableNames = false;
+        basis = NULL;
     }
 
     Tableau() {
         varNames = NULL;
         enableVariableNames = false;
+        basis = NULL;
     }
 
     ~Tableau() {
@@ -181,6 +283,51 @@ public:
             varIDs.clear();
             delete[] varNames;
         }
+        if (basis != NULL) {
+            delete[] basis;
+        }
+    }
+
+    void computeBasis(Scalar tollerance=1e-7) {
+        if (basis == NULL) {
+            basis = new Basis(numConstr);
+        }
+        else {
+            delete[] basis;
+            basis = new Basis(numConstr);
+        }
+
+        for (size_t i = 0; i < tableauWidth-1; i++) {
+            size_t numNonzeroEntries = 0;
+            size_t rowIndex = 0;
+            Scalar nonZeroEntry = 0.0;
+
+            auto itr = this->ColumnIterator(i);
+            for (size_t j = 0; !itr.isEnd(); itr++, j++) {
+                Scalar val = *itr;
+                if (std::abs(val) > tollerance) {
+                    numNonzeroEntries++;
+                    if (numNonzeroEntries > 1) {
+                        break;
+                    }
+
+                    rowIndex = j;
+                    nonZeroEntry = val;
+                }
+            }
+
+            ASSERT(numNonzeroEntries != 0,"Error! There is a zero column in the tableau.")
+
+            if (numNonzeroEntries == 1) {
+                basis->AddEntry(i, rowIndex, nonZeroEntry, this->[rowIndex, tableauWidth-1]);
+            }
+        }
+
+        basis->complete = true;
+    }
+
+    Scalar GetObjectiveValue() {
+        return tableauBody[tableauHeight * tableauWidth - 1];
     }
 
     void AddVarNames(std::vector<std::string> initVarNames) {
@@ -436,13 +583,29 @@ public:
     }
 }
 
+#define OPTIMAL_SOLUTION_FOUND 0 
+#define STOPPED_AT_MAX_ITER 1
+#define STOPPED_AT_MAX_TIME 2
+#define UNBOUNDED 3
+#define INFEASIBLE 4
+
+#define CONSTR_EQ 0
+#define CONSTR_LEQ 1
+#define CONSTR_GEQ 2
+
 class SimplexSolver {
 protected:
-    Tableau tableau;
-    BasicTableau<FormatingRelationship> initialTableauInfo;
-    BasicTableau<FormatingRelationship> sfTableauInfo;
+    Tableau* tableau;
     
     size_t numBaseVar = 0;
+    size_t numBaseConstr = 0;
+
+    size_t numAugmentedVariables = 0;
+    size_t numSlackSurplusVars = 0;
+    size_t numArtificialVars = 0;
+
+    size_t numDuplicatedConstr = 0;
+    size_t numActiveUpperBounds = 0;
 
     bool modelEngaged = false;
     std::chrono::time_point<clock_> tic_time;
@@ -462,13 +625,6 @@ protected:
     Scalar liveUpdateTime = 0;
 
     std::vector<std::pair<size_t, std::string>> logs;
-
-    static const int UNBOUNDED_FLAG = 001;
-    static const int INFEASIBLE_FLAG = 002;
-
-    static const size_t CONSTR_EQ = 0;
-    static const size_t CONSTR_LEQ = 1;
-    static const size_t COSNTR_GEQ = 2;
 
     Scalar* shiftValues;
     bool* invertStatus;
@@ -530,13 +686,14 @@ public:
         //This is involve adding a number of additional variables and constraints.
         //So to start, I'll calculate the number of additional variables and constraints that I need.
         numBaseVar = initNumVar;
+        numBaseConstr = initNumConstr;
 
         //1.1: Now deal with the variable bounds
         shiftValues = new Scalar[initNumVar];
         invertStatus = new bool[initNumVar];
         augmented_OldToNew_Index = new int[initNumVar];
-        size_t numAugmentedVariables = 0;
-        size_t numActiveUpperBounds = 0;
+        numAugmentedVariables = 0;
+        numActiveUpperBounds = 0;
 
         for (size_t i = 0; i < initNumVar; i++) {
             shiftValues[i] = 0;
@@ -668,11 +825,13 @@ public:
         //Each GEQ has a surplus var and an artificial var
         //Each augmented variable must be added
         //Each active upper bound will have a slack var.
-        size_t numSlackSurplus = initNumConstr + numEQ + numActiveUpperBounds;
-        size_t numArtificialVars = numGEQ;
+        numSlackSurplusVars = initNumConstr + numEQ + numActiveUpperBounds;
+        numArtificialVars = numGEQ;
 
-        size_t numAdditionalVars = numAugmentedVariables + numSlackSurplus + numArtificialVars;
+        size_t numAdditionalVars = numAugmentedVariables + numSlackSurplusVars + numArtificialVars;
         size_t numAdditionalConstrs = numEQ + numActiveUpperBounds;
+
+        numDuplicatedConstr = numEQ;
         
         if (numGEQ > 0) {
             //This indicates that we'll need to sovle the auxilary problem first and then the normal problem
@@ -710,7 +869,7 @@ public:
 
         //2.2: Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
         std::string baseSlackVarName = "SLACK_VAR_";
-        for (size_t i = 0; i < numSlackSurplus; i++) {
+        for (size_t i = 0; i < numSlackSurplusVars; i++) {
             varNames[numBaseVar + numAugmentedVariables + i] = baseSlackVarName + std::to_string(i);
         }
         //2.3: Now create the artificial variables. These will be indexed in sequence following the slack variables.
@@ -805,7 +964,7 @@ public:
 
         //3.1.3 REGION 13, Slack/Surplus variables in the original model equations
         jStart = initNumVar + numAugmentedVariables;
-        jStop = jStart + numSlackSurplus; //numEQ added since this region (along with region 23 should be square)
+        jStop = jStart + numSlackSurplusVars; //numEQ added since this region (along with region 23 should be square)
         for (size_t i = 0; i < initNumConstr; i++) {
             for (size_t j = jStart; j < jStop; j++) { 
                 tableau[i,j] = 0; //One repeated "assignment" operation is faster than n "if" operations. So I'll just assign all zeros and then re-asign the one non-zero value.
@@ -822,7 +981,7 @@ public:
 
         //3.1.4 REGION 14, Artificial variables in the original model equations.
         
-        jStart = initNumVar + numAugmentedVariables + numSlackSurplus;
+        jStart = initNumVar + numAugmentedVariables + numSlackSurplusVars;
         jStop = jStart + numArtificialVars;
         size_t numGEQEncountered = 0;
         for (size_t i = 0; i < initNumConstr; i++) {
@@ -838,7 +997,7 @@ public:
 
         //3.1.5 REGION 15, Original Objective Function coefs in the original model equations.
         if (!auxProblemSolved) {
-            size_t j = initNumVar + numAugmentedVariables + numSlackSurplus+ numArtificialVars;
+            size_t j = initNumVar + numAugmentedVariables + numSlackSurplusVars+ numArtificialVars;
             for (size_t i = 0; i < initNumConstr; i++) {
                 tableau[i,j] = 0;
             }
@@ -847,7 +1006,7 @@ public:
         //3.1.6 REGION 16, Constants in the original model equations (adjusted by variable shifts and inverts, handled earlier)
         size_t j = tableauWidth - 1;
         for (size_t i = 0; i < initNumConstr; i++) {
-            tableau[i,j] = initC[i];
+            tableau[i,j] = initB[i];
         }
 
         //3.2 Duplated Equality Constraints
@@ -924,213 +1083,109 @@ public:
             }
         }
 
-        //3.4 Orginal Objective Function (REGIONs 41-46)
-        
-
-        
-
-        
-
-
-        //EVERYTHING FROM HERE DOWN IS OLD CODE.
-
-
-        //Now Fill in the Constant Column
-        numEQEncountered = 0;
-        for (size_t i = 0; i < numConstr; i++) {
-            //First, find the index of the original. This is i.
-            //Then, map that index onto the indices of the tableau.
-            size_t j = (i + numEQEncountered) * tableauWidth
-            tableauBody[j] = initB[i];
-
-            //If this constr is an EQ constr, repeat it's value on the next tableau row.
-            bool thisIsAnEQConstr = constrTypes[ii] == CONSTR_EQ;
-            if (thisIsAnEQConstr) {
-                j += tableauWidth;
-                tableauBody[j] = initB[i];
-            }
+        //3.4 Orginal Objective Function
+        //3.4.1 REGION 41, Original objective function coefs (after shift and inverts)
+        size_t i = talbleau.tableauHeight - 1;
+        if (!auxProblemSolved) {
+            i -= 1
+        }
+        for (size_t j = 0; j < initNumVar; j++) {
+            tableau[i,j] = -initC[j];
         }
 
-        //Now fill in the slack variable values.
-        //  LEQ constraints have a 1 in the diagonal and 0s everywhere else
-        //  GEQ constraints have a -1 in the diagonal and 0s everywhere else
-        //Also we'll fill in the artificial variable values.
-        //  LEQ constraints have zeros everywhere
-        //  GEQ constraints have a 1 in the "diagonal" and zeros everywhere else
-        numEQEncountered = 0;
-        numGEQEncountered = 0;
-        for (size_t i = 0; i < numConstr; i++) {
-            size_t ii = i - numEQEncountered;
-            size_t constrType = constrTypes[ii];
-            if (constrType == CONSTR_EQ) {
-                for (size_t iii = 0; iii < numConstr; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + i] = 1;
-
-                for (size_t iii = 0; iii < numArtificialVars; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
-                }
-
-                i++;
-                numEQEncountered++;
-                
-                for (size_t iii = 0; iii < numConstr; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + i] = -1;
-
-                for (size_t iii = 0; iii < numArtificialVars; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + numConstr + numGEQEncountered] = 1;
-                numGEQEncountered++;
-            }
-            else if (constrType == CONSTR_LEQ) {
-                for (size_t iii = 0; iii < numConstr; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + i] = 1;
-
-                for (size_t iii = 0; iii < numArtificialVars; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
-                }
-            }
-            else {
-                for (size_t iii = 0; iii < numConstr; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + iii] = -1;
-
-                for (size_t iii = 0; iii < numArtificialVars; iii++) {
-                    tableauBody[tableauWidth * i + numBaseVar + numConstr + iii] = 0;
-                }
-                tableauBody[tableauWidth * i + numBaseVar + numConstr + numGEQEncountered] = 1;
-                numGEQEncountered++;
-            }
+        //3.4.2 REGION 42, Augmented objective function coefs
+        jStart = initNumVar;
+        jStop = jStart + numAugmentedVariables;
+        for (size_t newJ = jStart; newJ < jStop; newJ++) {
+            size_t oldJ = augmented_NewToOld_Index[newJ];
+            tableau[i,newJ] = -tableau[i,oldJ];
         }
 
-        //Now fill in the objective function row.
-        //This behaves differently if we need to solve the auxilary problem first or not.
-        bottomRowStart = tableauWidth * numConstr;
-        bottomRowEnd = bottomRowStart + numVar;
-
-        lastColStart = tableauWidth - 1;
-        lastColEnd = tableauHeight * tableauWidth;
-
-        if (auxProblemSolved) {
-            //The bottom row will be the original objective function.
-
-            //The first entries will correspond to the original values. (But Negative)
-            for (size_t i = 0; i < numBaseVar; i++) {
-                tableauBody[i + bottomRowStart] = -initC[i];
-            }
-            //The obj value will be put in the appropriate place.
-            tableauBody[bottomRowEnd-1] = initC[numBaseVar-1];
-
-            //The rest of the obj function row will be zeros.
-            for (size_t i = 0; i < numLEQ; i++) {
-                tableauBody[i + bottomRowStart + numBaseVar] = 0;
-            }
+        //3.4.3 REGIONs 43 & 44, Slack, Surplus, and Artificial variables in the original objective function.
+        jStart = initNumVar + numAugmentedVariables;
+        jStop = jStart + numSlackSurplusVars + numArtificialVars;
+        for (size_t j = jStart; j < jStop; j++) {
+            talbeau[i,j] = 0;
         }
-        else {
-            //The bottom-most row will be the auxilary objective function.
+
+        //3.4.4 REGION 45, The original objective function variable coef
+        if (!auxProblemSolved) {
+            tableau[i, tableau.tableauWidth - 2] = 1;
+        }
+
+        //3.4.5 REGION 46, The original objective function value.
+        tableau[i, tableau.tableauWidth - 1] = initC[initNumVar];
+
+        //3.5 The auxilary Objective Function
+        if (!auxProblemSolved) {
+            i = talbleau.tableauHeight - 1;
+
+            //3.5.1 REGIONS 51 and 52, The aux. obj. function original and auxilary variable coefs.
 
             //We want to minimize the art. vars. but since that objective function and associated minimiation is problematic, we'll solve for the equivalent objective coefs.
             //  For an example, see 10:10 of https://www.youtube.com/watch?v=-RtEzwfMqxk&list=PLg2tfDG3Ww4vyVtIvTUY2JaOZDbQStcsb&index=8
-            //The first coefs will be the sum of the A matrix columns
-            for (size_t i = 0; i < numBaseVar; i++) {
-                Scalar columnSum = 0;
-                for (size_t j = 0; j < numConstr; j++) {
-                    columnSum += tableauBody[j * tableauWidth + i];
+            //  The coefs we'll use will be the sum of the elements in each column that correspond to a row that contains an artificial variable.
+            //  In our case, this will be any original constraint that is either GEQ or EQ.
+            jStop = initNumVar + numAugmentedVariables;
+            for (size_t j = 0; j < jStop; j++) {
+                Scalar sum = 0;
+                for (size_t ii = 0; ii < initNumConstr; ii++) {
+                    if (constrTypes[ii] != CONSTR_LEQ) {
+                        sum += tableau[ii,j];
+                    }
                 }
 
-                tableauBody[(tableauHeight - 1) * tableauWidth + i] = columnSum;
+                tableau[i,j] = sum;
             }
 
-            //The Slack variable columns will be -1 if the associated constraint is a geq constraint, 0 otherwise.
-            numEQEncountered = 0;
-            for (size_t i = 0; i < numConstr; i++) {
-                if (i - numEQEncountered == CONSTR_EQ) {
-                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = 0;
-                    i++;
-                    numEQEncountered++;
-                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = -1;
-                }
-                else if (i - numEQEncountered == CONSTR_LEQ) {
-                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = 0;
+            // 3.5.2 REGION 53, This will be a list of zeros except for -1's in the columns corresponding to a surplus variable.
+            jStart = initNumVar + numAugmentedVariables;
+            jStop  = jStart + numSlackSurplusVars;
+            for (size_t j = jStart; j < jStop; j++) {
+                //REGIONs 13, 23, and 33 should form a sort of indetitiy matrix.
+                //I'll take advantage of this to determine which value in this column should be nonzero.
+                size_t ii = j - jStart;
+                if (signbit(tableau[ii,j])) { // If this value is negative (It must be -1 or 1)
+                    tableau[i,j] = -1;
                 }
                 else {
-                    tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + i] = -1;
+                    tableau[i,j] = 0;
                 }
             }
 
-            //The art. var. columns will be 0
-            for (size_t i = 0; i < numArtificialVars; i++) {
-                tableauBody[(tableauHeight - 1) * tableauWidth + numBaseVar + numConstr + i] = 0;
+            // 3.5.3 REGIONs 54 and 55, the artificial and original objective function coefs in the auxilary objective function.
+            jStart = initNumVar + numAugmentedVariables + numSlackSurplusVars;
+            jStop = jStart + numArtificialVars + 1;
+            for (size_t j = jStart; j < jStop; j++) {
+                tableau[i,j] = 0;
             }
 
-            //The original objective variable will have a value of zero
-            tableauBody[tableauHeight * tableauWidth - 2] = 0;
-
-            //The constant column will be the sum of elements of the original constant column that correspond to GEQ constriants.
-            Scalar columnSum = 0;
-            numEQEncountered = 0;
-            for (size_t i = 0; i < initNumConstr; i++) {
-                if (constrTypes[i] == CONSTR_LEQ) {}
-                else {
-                    columnSum += initC[i];
+            //3.5.4 REGION 56, the initial value of the auxilary objective funciton.
+            //Similarly to section 3.5.1, we'll sum up the constant values in row associated with an original EQ or GEQ constraint.
+            j = tableau.tableauWidth - 1;
+            Scalar sum = 0;
+            for (size_t ii = 0; ii < initNumConstr; ii++) {
+                if (constrTypes[ii] != CONSTR_LEQ) {
+                    sum += tableau[ii,j];
                 }
             }
-            tableauBody[tableauHeight * tableaWidth - 1] = columnSum;
 
-
-            //The next row up will be the original objective function. 
-            //The first columns correspond to the original variables. (Made negative since P - Coefs = Const)
-            TODO
-
-            //The constant column is the same.
-            TODO
-
-            //The original objective variable has a coef of 1.
-            TODO
-
-            //All other variables have a coef of 0.
-            TODO
+            tableau[i,j] = sum;
         }
 
+        // 4: Housekeeping variables.
         pointerOwnership = true;
 
         modelOptimized = false;
         modelEngaged = true;
     }
 
-    void EngageModel(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody, std::string* initVarNames = NULL, bool transferOwnership = false) {
+    void EngageModel(Tableau* initTableau, bool transferOwnership = false) {
         if (modelEngaged) {
             DisengageModel();
         }
 
-        tableauBody = initTableauBody;
-        numVar = initNumVar;
-        numConstr = initNumConstr;
-        varNames = initVarNames;
-        if (initVarNames == NULL) {
-            enableVariableNames = false;
-        }
-        else {
-            for (size_t i = 0; i < numVar; i++) {
-                varIDs[varNames[i]] = i;
-            }
-        }
-
-        tableauHeight = numConstr + 1;
-        tableauWidth = numVar + 1;
-
-        bottomRowStart = tableauWidth * numConstr;
-        bottomRowEnd = bottomRowStart + numVar;
-
-        lastColStart = tableauWidth - 1;
-        lastColEnd = tableauHeight * tableauWidth;
+        tableau = initTableau;
 
         pointerOwnership = transferOwnership;
 
@@ -1144,35 +1199,39 @@ public:
                 if (enableVariableNames) {
                     delete[] varNames;
                 }
-                delete[] tableauBody;
-                if (basisVars != NULL) {
-                    delete[] basisVars;
-                }
-                delete[] slackRelationships;
+                delete[] tableau;
             }
 
-            tableauBody = NULL;
-            numVar = 0;
+            tableau = NULL;
             numBaseVar = 0;
-            numConstr = 0;
+            numBaseConstr = 0;
+            numAugmentedVariables = 0;
+            numSlackSurplusVars = 0;
+            numArtificialVars = 0;
+            numDuplicatedConstr = 0;
+            numActiveUpperBounds = 0;
+
             varNames = NULL;
-            basisVars = NULL;
-            tableauHeight = 0;
-            tableauWidth = 0;
             varIDs.clear();
             pointerOwnership = false;
             enableVariableNames = false;
-            numSlackRelationships = 0;
 
             modelOptimized = false;
-            modelEngaged = false;
 
             delete[] shiftValues;
+            shiftValues = NULL;
             delete[] invertStatus;
+            invertStatus = NULL;
             delete[] augmented_OldToNew_Index;
+            augmented_OldToNew_Index = NULL;
             delete[] augmented_NewToOld_Index;
+            augmented_NewToOld_Index = NULL;
             delete[] duplicatedConstr_OldToNew_Index;
+            duplicatedConstr_OldToNew_Index = NULL;
             delete[] duplicatedConstr_NewToOld_Index;
+            duplicatedConstr_NewToOld_Index = NULL;
+
+            modelEngaged = false;
         }
     }
 
@@ -1211,17 +1270,19 @@ public:
 
     bool GetOptimalityStatus(bool maximize) {
         bool optimal = true;
+        auto itr = tableau->ObjRowIterator();
         if (maximize) {
-            for (size_t i = bottomRowStart; i < bottomRowEnd; i++) {
-                if (LessThanZero(tableauBody[i])) {
+            for (; !itr.isEnd(); itr++) {
+                if (LessThanZero(*itr)) {
                     optimal = false;
+                    
                     break;
                 }
             }
         }
         else {
-            for (size_t i = bottomRowStart; i < bottomRowEnd; i++) {
-                if (GreaterThanZero(tableauBody[i])) {
+            for (; !itr.isEnd(); itr++) {
+                if (GreaterThanZero(*itr)) {
                     optimal = false;
                     break;
                 }
@@ -1232,22 +1293,23 @@ public:
 
     size_t ComputePivotColumn(bool maximize) {
         size_t columnIndex = 0;
+        auto itr = tableau->ConstColIterator();
         if (maximize) {
-            Scalar minBottomVal = tableauBody[bottomRowStart];
-            size_t i = bottomRowStart + 1;
-            for (size_t j = 1; j < numVar; i++, j++) {
-                if (tableauBody[i] < minBottomVal) {
-                    minBottomVal = tableauBody[i];
+            Scalar minBottomVal = *itr;
+            itr++;
+            for (size_t j = 1; !itr.isEnd(); itr++, j++) {
+                if (*itr < minBottomVal) {
+                    minBottomVal = *itr;
                     columnIndex = j;
                 }
             }
         }
         else {
-            Scalar maxBottomVal = tableauBody[bottomRowStart];
-            size_t i = bottomRowStart + 1;
-            for (size_t j = 1; j < numVar; i++, j++) {
-                if (tableauBody[i] > maxBottomVal) {
-                    maxBottomVal = tableauBody[i];
+            Scalar maxBottomVal = *itr;
+            itr++;
+            for (size_t j = 1; !itr.isEnd(); itr++, j++) {
+                if (*itr > maxBottomVal) {
+                    maxBottomVal = *itr;
                     columnIndex = j;
                 }
             }
@@ -1259,27 +1321,31 @@ public:
     size_t ComputePivotRow(size_t pivotCol) {
         size_t rowIndex = 0;
 
-        size_t lastColIndex = lastColStart;
-        size_t pivotColIndex = pivotCol;
+        auto constColItr = tableau->ConstColIterator();
+        auto pivColItr = tableau->ColumnIterator(pivotCol);
+
         Scalar minComparisonVal;
-        if (LessThanZero(tableauBody[pivotColIndex])) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
+        if (LessThanZero(*pivColItr)) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
             minComparisonVal = SCALAR_INF; 
         }
         else {
-            minComparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+            minComparisonVal = *constColItr / *pivColItr;
         }
 
-        lastColIndex += tableauWidth;
-        pivotColIndex += tableauWidth;
-        for (size_t j = 1; j < numConstr; j++, lastColIndex += tableauWidth, pivotColIndex += tableauWidth) {
-            if (EqualsZero(tableauBody[pivotColIndex])) {
+        constColItr++;
+        pivColItr++;
+        
+        for (size_t j = 1; !constColItr.isEnd(); constColItr++, pivColItr++, j++) {
+            Scalar pivotVal = *pivColItr;
+            if (EqualsZero(pivotVal)) {
                 continue; //This will return an infinite result which, under no circumstances, is the best.
             }
-            if (LessThanZero(tableauBody[pivotColIndex])) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
+            if (LessThanZero(pivotVal)) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
                 continue;
             }
             
-            Scalar comparisonVal = tableauBody[lastColIndex] / tableauBody[pivotColIndex];
+            Scalar constVal = *constColItr;
+            Scalar comparisonVal = constVal / pivotVal;
 
             if (comparisonVal < minComparisonVal) {
                 rowIndex = j;
@@ -1288,7 +1354,7 @@ public:
         }
 
         if (minComparisonVal == SCALAR_INF) {
-            throw UNBOUNDED_FLAG;
+            throw UNBOUNDED;
         }
 
         return rowIndex;
@@ -1296,32 +1362,40 @@ public:
 
     void PerformPivot(const size_t& pivotCol, const size_t& pivotRow) {
         //Step 1: Divide the pivot row by the pivot value
-        Scalar pivotValue = tableauBody[tableauWidth * pivotRow + pivotCol];
+        Scalar pivotValue = tableau->[pivotRow, pivotCol];
 
-        size_t startVal = tableauWidth * pivotRow;
-        size_t endVal = startVal + tableauWidth;
+        auto pivRowItr = tableau->RowIterator(pivotRow);
 
-        for (size_t i = startVal; i < endVal; i++) {
-            tableauBody[i] /= pivotValue;
+        for (; !pivRowItr.isEnd(); pivRowItr++) {
+            *pivRowItr /= pivotValue;
         }
 
         //Step 2: Row reduce all the other rows so that the pivot value (which is now 1) is the only non-zero value in the pivot column
-        for (size_t row_i = 0; row_i < tableauHeight; row_i++) {
+        for (size_t row_i = 0; row_i < tableau->tableauHeight; row_i++) {
             if (row_i == pivotRow) {
                 continue;
             }
 
-            Scalar rowMultiplier = tableauBody[row_i * tableauWidth + pivotCol];
-            for (size_t col_i = 0; col_i < tableauWidth; col_i++) {
-                tableauBody[row_i * tableauWidth + col_i] -= rowMultiplier * tableauBody[pivotRow * tableauWidth + col_i];
+            Scalar rowMultiplier = tableau->[row_i, pivotCol];
+
+            auto rowIItr = tableau->RowIterator(row_i);
+            pivRowItr = tableau->RowIterator(pivotRow);
+
+            for (; !rowIItr.isEnd(); rowIItr++, pivRowItr++) {
+                *rowIItr -= rowMultiplier * *pivRowItr;
             }
         }
-
-        //Step 3: Swap in the appropriate basis valriable
-        basisVars[pivotRow] = pivotCol;
     }
 
-    Scalar GetVariableValue(std::string varName) {
+    Scalar GetVariableValue(size_t varIndex, size_t basisReductionOption = BASIS_REDUCTION_AVG) {
+        if (!tableau->basis->complete) {
+            tableau->computeBasis();
+        }
+
+        return tableau->basis->GetVariableValue(varIndex, basisReductionOption)
+    }
+
+    Scalar GetVariableValue(std::string varName, size_t basisReductionOption = BASIS_REDUCTION_AVG) {
         ASSERT(enableVariableNames,"Error! You cannot get the variable values by name when variable names are not enabled. Use GetVariableValue(size_t index) instead.");
 
         if (!modelOptimized) {
@@ -1329,51 +1403,17 @@ public:
         }
         size_t varIndex;
         try {
-            varIndex = varIDs.at(varName);
+            varIndex = tableau->varIDs.at(varName);
         }
         catch (const std::out_of_range& err) {
             ASSERT(false,"Error! Attempting to access the value of a variable that is not registered as part of this model.");
         }
 
-        size_t basisIndex;
-        bool indexFound = false;
-        for (size_t i = 0; i < numConstr; i++) {
-            if (basisVars[i] == varIndex) {
-                basisIndex = i;
-                indexFound = true;
-                break;
-            }
-        }
-
-        if (!indexFound) {
-            return 0.0;
-        }
-        else {
-            return tableauBody[(basisIndex+1) * tableauWidth - 1];
-        }
-    }
-
-    Scalar GetVariableValue(size_t varIndex) {
-        size_t basisIndex;
-        bool indexFound = false;
-        for (size_t i = 0; i < numConstr; i++) {
-            if (basisVars[i] == varIndex) {
-                basisIndex = i;
-                indexFound = true;
-                break;
-            }
-        }
-
-        if (!indexFound) {
-            return 0.0;
-        }
-        else {
-            return tableauBody[(basisIndex+1) * tableauWidth - 1];
-        }
+        return GetVariableValue(varIndex, basisReductionOption);
     }
 
     Scalar GetObjectiveValue() {
-        return tableauBody[tableauWidth * tableauHeight - 1];
+        return tableau->GetObjectiveValue();
     }
 
     void SetLiveUpdateSettings(size_t newLiveUpdateIter, Scalar newLiveUpdateTime) {
@@ -1386,151 +1426,20 @@ public:
         std::cout << "Itr: " << FormatSizeT(itr,10) << " Time: " << FormatScalar(time,15) << " Objective Value: " << GetObjectiveValue() << '\n';
     }
 
-    size_t SolveInitProblemWithSolver() {
-        //NOTES ON STUFF TO FIX:
-        // For each Constraint, add a artif. var. If the coef. if neg. put -1 as the coef for the art. var.
-        // If the coef. is positive put 1 as the art. var. coef.
-        // Then, for the obj. func. values sum up the non-art. var. coefs and multiply by negatvie one as shown here: https://www.youtube.com/watch?v=-RtEzwfMqxk&list=PLg2tfDG3Ww4vyVtIvTUY2JaOZDbQStcsb&index=8
-
-        if (basisVars == NULL) {
-            ASSERT(pointerOwnership,"Error! It's unclear how to deal with a NULL basis that we don't have ownership of.");
-            basisVars = new int[numConstr];
-        }
-        otherSolver.setMaxIter(maxIter);
-        otherSolver.setMaxTime(maxTime);
-
-        //Add an artificial variable to each constraint
-        size_t numArtificialVars = numConstr;
-
-        size_t numAuxVars = numArtificialVars;
-        size_t otherNumVars = numVar + numAuxVars;
-        Scalar* otherTableau = new Scalar[(otherNumVars + 1) * (numConstr + 1)];
-
-        size_t otherTableauHeight = tableauHeight;
-        size_t otherTableauWidth = otherNumVars + 1;
-
-        //Load the other Tableau Coefs
-        Scalar sumConsts = 0;
-        for (size_t i = 0; i < numConstr; i++) {
-            //Constant Value:
-            size_t myIndex = (i+1) * tableauWidth - 1;
-            size_t otherIndex = (i+1) * otherTableauWidth - 1;
-            Scalar constVal = tableauBody[myIndex];
-            otherTableau[otherIndex] = constVal;
-            sumConsts += constVal;
-            
-            //Regular Var Coefs
-            for (size_t j = 0; j < numVar; j++) {
-                size_t myIndex = i * tableauWidth + j;
-                size_t otherIndex = i * otherTableauWidth + j;
-                otherTableau[otherIndex] = tableauBody[myIndex];
-            }
-        }
-        //Artificial Variable Coefs
-        for (size_t i = 0; i < numArtificialVars; i++) {
-            size_t varI = numVar + i;
-            for (size_t j = 0; j < numConstr; j++) {
-                if (i == j) {
-                    otherTableau[j * otherTableauWidth + varI] = -1;
-                }
-                else {
-                    otherTableau[j * otherTableauWidth + varI] = 0;
-                }
-            }
-        }
-
-        //Now go through and specify new objective row (to minimize all auxilary variables)
-        for (size_t i = 0; i < numVar; i++) {
-            otherTableau[otherTableauWidth * numConstr + i] = 0;
-        }
-        for (size_t i = numVar; i < otherNumVars; i++) {
-            otherTableau[otherTableauWidth * numConstr + i] = 1;
-        }
-        otherTableau[otherTableauHeight * otherTableauWidth - 1] = 0;
-
-        //Now specify a initial basis.
-        //Since the Aux valriables can be whatever, We'll specify that the original variables must be zero.
-        //  i.e. The initial basis must consist of just the artificial variables.
-        for (size_t i = 0; i < numArtificialVars; i++) {
-            basisVars[i] = numVar + i;
-        }
-
-        //Engage Model
-        std::string* otherVarNames = NULL;
-        if (enableVariableNames_InitProblem && enableVariableNames) {
-            otherVarNames = new std::string[otherNumVars];
-            for (size_t i = 0; i < numVar; i++) {
-                otherVarNames[i] = varNames[i];
-            }
-            for (size_t i = 0; i < numArtificialVars; i++) {
-                otherVarNames[i + numVar] = "ARTIF_VAR[" + std::to_string(i) + "]";
-            }
-        }
-        otherSolver.EngageModel(otherNumVars,numConstr,otherTableau,numSlackRelationships,slackRelationships,basisVars,otherVarNames,false);
-        if (enableLiveUpdates) {
-            otherSolver.SetLiveUpdateSettings(liveUpdateIter, liveUpdateTime);
-        }
-
-        //Perform Forced Pivot
-        std::cout << otherSolver.TableauToTerminalString() << "\n";
-        size_t forcePivotCol = 0;
-        size_t forcePivotRow = otherSolver.ComputePivotRow(forcePivotCol);
-        otherSolver.PerformPivot(forcePivotCol,forcePivotRow);
-
-        //Sove regularly
-        size_t otherIterations = otherSolver.Solve();
-
-        if (enableVariableNames_InitProblem && enableVariableNames) {
-            delete[] otherVarNames;
-        }
-
-        //Copy over logs
-        std::vector<std::pair<size_t,std::string>> otherLogs = otherSolver.GetLogs();
-        for (size_t i = 0; i < otherLogs.size(); i++) {
-            logs.push_back(std::make_pair(otherLogs[i].first,"AUXILARY PROBLEM: " + otherLogs[i].second));
-        }
-
-        //Check Feasibility
-        //In order to be feasible, the feasibility variable and all artificial variables must be absent from the basis.
-        bool feasible = true;
-        for (size_t i = 0; i < numConstr; i++) {
-            if (basisVars[i] >= numVar) {
-                feasible = false;
-                break;
-            }
-        }
-
-        delete[] otherTableau;
-
-        if (!feasible) {
-            throw INFEASIBLE_FLAG;
-        }
-
-        //The otherSolver acted directly on this solver's basisVars object.
-        //  That, and the fact that all the non artificial/feasibility variables lie after the original variables
-        //  makes it so that the computed basis is valid for the original model as well. There is no need to
-        //  copy it over.
-
-        
-
-        return otherIterations;
-    }
-
     size_t SolveCurrentSetup(bool maximize, size_t& iterationNum, size_t& liveUpdateIterCounter, size_t& liveUpdateTimeCounter) {
         //Make sure model is engaged before proceeding
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
 
-
         bool solutionIsOptimal = GetOptimalityStatus(maximize);
-
         
-        size_t exitCode = 0;
+        size_t exitCode = OPTIMAL_SOLUTION_FOUND;
 
         std::cout << TableauToTerminalString() << "\n";
         while (!solutionIsOptimal) {
             if (iterationNum > maxIter) {
                 exitCode = 1;
                 log(LOG_INFO,"Maximum number of Iterations Exceeded.");
+                exitCode = STOPPED_AT_MAX_ITER;
                 break;
             }
             iterationNum++;
@@ -1538,6 +1447,7 @@ public:
             if (currentTime > maxTime) {
                 exitCode = 2;
                 log(LOG_INFO,"Maximum solve time exceeded.");
+                exitCode = STOPPED_AT_MAX_TIME;
                 break;
             }
 
@@ -1560,7 +1470,7 @@ public:
             }
             catch (const int& e) {
                 switch (e) {
-                    case UNBOUNDED_FLAG:
+                    case UNBOUNDED:
                         log(LOG_ERROR,"The Model was proven to be unbounded.");
                     default:
                         throw e;
@@ -1569,39 +1479,69 @@ public:
             PerformPivot(pivotCol,pivotRow);
 
             solutionIsOptimal = GetOptimalityStatus(maximize);
-
-            std::cout << TableauToTerminalString() << "\n";
         }
 
-        if (exitCode == 0) {
+        if (exitCode == OPTIMAL_SOLUTION_FOUND) {
             log(LOG_INFO,"Optimal solution found.");
             modelOptimized = true;
         }
         log(LOG_INFO,std::to_string(iterationNum) + " iterations");
         log(LOG_INFO,std::to_string(toc()) + " seconds");
         log(LOG_INFO,"Best Found Objective Function Value: " + std::to_string(GetObjectiveValue()));
+
+        return exitCode;
     }
 
-    size_t Solve() {
+    void RemoveAuxilaryProblem() {
+        auto newTableau = new Tableau(numBaseVar + numAugmentedVariables + numSlackSurplusVars, numBaseConstr + numDuplicatedConstr + numActiveUpperBounds);
+
+        //Copy all Original, Augmented, Slack, and Surplus variables across all model equations, duplicated model equations, variable bounds, and original objective funcion over to the new tableau.
+        //REGIONS: 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43
+        size_t jStart = 0;
+        size_t jStop = numBaseVar + numAugmentedVariables + numSlackSurplusVars;
+        size_t iStart = 0;
+        size_t iStop = numBaseConstr + numDuplicatedConstr + numActiveUpperBounds + 1;
+
+        for (size_t i = iStart; i < iStop; i++) {
+            for (size_t j = jStart; j < jStop; j++) {
+                newTableau->[i,j] = tableau->[i,j];
+            }
+        }
+
+        //Copy over all constraint column values for original model equations, duplicated equations, and variable bounds and original objective function.
+        //REGIONS: 16,26,36
+        size_t oldJ = tableau->tableauWidth - 1;
+        size_t newJ = newTableau->tableauWidth - 1;
+        for (size_t i = iStart; i < iStop; i++) {
+            newTableau->[i,newJ] = tableau->[i,oldJ];
+        }
+
+        //Delete the old tableau and replace it with the new one.
+        delete tableau;
+        tableau = newTableau;
+    }
+
+    void Solve() {
         size_t iterationNum = 0;
         size_t liveUpdateIterCounter = 0;
         size_t liveUpdateTimeCounter = 0;
 
         if (!auxProblemSolved) {
-            SolveCurrentSetup(false,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
+            log(LOG_INFO,"Solving Auxilary Problem...");
+            size_t auxilaryProblemExitCode = SolveCurrentSetup(false,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
 
             //Assert that the auxilary problem was solved to optimality. Otherwise abort.
-            TODO
+            ASSERT(auxilaryProblemExitCode == OPTIMAL_SOLUTION_FOUND,"Error! Auxilary problem exited with a non-optimal solution code");
+            log(LOG_INFO,"Auxilary Problem Solved to Optimality.");
+            
+            //Assert that the auxilary problem was solved to an objective function value of 0. Otherwise the model is infeasible.
+            Scalar auxilaryObjectiveValue = tableau->GetObjectiveValue();
+            bool feasibleStatus = EqualsZero(auxilaryObjectiveValue);
+            ASSERT(feasibleStatus,"The model was proven to be infeasible.");
+            auxProblemSolved = true;
 
-            //Chop off the Auxilary Objective Function Row and all artificial variable / objective function columns
-            //  In the Tableau
-            TODO
-
-            //  And in the variable name list
-            TODO
-
-            //Update all the tableau size constants (numVar, tableaWidth, etc.)
-            TODO
+            //Remove the auxilary variables, objective, etc. from the tableau
+            RemoveAuxilaryProblem();
         }
 
         //Now that the auxilary problem is sovled, the tableau is ready to be solved normally.
