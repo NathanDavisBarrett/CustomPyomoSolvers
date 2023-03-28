@@ -42,27 +42,413 @@ float DummyFunc(float arg1, float arg2) {
 typedef std::chrono::high_resolution_clock clock_;
 typedef std::chrono::duration<double, std::ratio<1> > second_;
 
-class SimplexSolver {
-protected:
-    Scalar* tableauBody = NULL;
+template <typename T>
+struct BasicTableau {
+public:
+    T* tableauBody = NULL;
     size_t numVar = 0;
-    size_t numBaseVar = 0;
     size_t numConstr = 0;
-    std::string* varNames = NULL;
-    std::map<std::string, size_t> varIDs;
-    //int* basisVars = NULL; DEPRECATED SINCE WE'RE GOING TO SCAN THROUGH AT THE END TO CHECK FOR DEGENERACY.
+    
     size_t tableauHeight = 0;
     size_t tableauWidth = 0;
+    bool pointerOwnership = true;
+
+    struct Iterator {
+    private:
+        size_t index;
+        T* tableauBody;
+        size_t iterDistance;
+        size_t end;
+
+    public:
+        Iterator(T* bodyRef, size_t initIndex, size_t initDist, size_t initEnd) {
+            index = initIndex;
+            tableauBody = bodyRef;
+            iterDistance = initDist;
+            end = initEnd;
+        }
+
+        T& operator*() {
+            return tableauBody[index];
+        }
+
+        Iterator& operator++() {
+            index += iterDistance;
+            return *this;
+        }
+
+        friend bool operator== (const Iterator& a, const Iterator& b) {
+            return a.index == b.index;
+        }
+        friend bool operator!= (const Iterator& a, const Iterator& b) {
+            return a.index != b.index;
+        }
+
+        bool isEnd() {
+            return index < end;
+        }
+    };
+
+    BasicTableau(size_t initNumVar, size_t initNumConstr) {
+        numVar = initNumVar;
+        numConstr = initNumConstr;
+        
+        tableauHeight = numConstr + 1;
+        tableauWidth = numVar + 1;
+
+        tableauBody = new T[tableauHeight * tableauWidth];
+        pointerOwnership = true;
+    }
+
+    BasicTableau(size_t initNumVar, size_t initNumConstr, T* initTableauBody) {
+        tableauBody = initTableauBody;
+        numVar = initNumVar;
+        numConstr = initNumConstr;
+        tableauHeight = numConstr + 1;
+        tableauWidth = numVar + 1;
+        pointerOwnership = false;
+    }
+
+    BasicTableau() {
+        tableauBody = NULL;
+        numVar = 0;
+        numConstr = 0;
+        tableauHeight = 0;
+        tableauWidth = 0;
+        pointerOwnership = false;
+    }
+
+    ~BasicTableau() {
+        if (pointerOwnership) {
+            delete[] tableauBody;
+        }
+    }
+
+    T& operator[](size_t row, size_t col) {
+        //FIXME: For production code, comment out these lines.
+        ASSERT(row < tableauHeight,"Out of bounds error!");
+        ASSERT(col < tableauWidth,"Out of bounds error!");
+
+        return tableauBody[row * tableauWidth + col];
+    }
+
+    Iterator ColumnIterator(size_t col) {
+        return Iterator(tableauBody, col, tableauWidth, tableauHeight * tableauWidth);
+    }
+    Iterator RowIterator(size_t row) {
+        return Iterator(tableauBody, row * tableauWidth, 1, (row + 1) * tableauWidth);
+    }
+
+    T* getRawPtr() {
+        return tableauBody;
+    }
+};
+
+struct Tableau: public BasicTableau<Scalar> {
+public:
+    std::string* varNames = NULL;
+    std::map<std::string, size_t> varIDs;
+    bool enableVariableNames = true;
+
+    Tableau(size_t initNumVar, size_t initNumConstr, std::vector<std::string> initVarNames = {}): BasicTableau<Scalar>(initNumVar, initNumConstr) {
+        if (initVarNames.size() > 0) {
+            enableVariableNames = true;
+            varNames = new std::string[initNumVar];
+            for (size_t i = 0; i < initNumVar; i++) {
+                varNames[i] = initVarNames[i];
+                varIDs[varNames[i]] = i;
+            }
+        }
+        else {
+            enableVariableNames = false;
+            varNames = NULL;
+        }
+
+    }
+
+    Tableau(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody): BasicTableau<Scalar>(initNumVar, initNumConstr, initTableauBody) {
+        varNames = NULL;
+        enableVariableNames = false;
+    }
+
+    Tableau() {
+        varNames = NULL;
+        enableVariableNames = false;
+    }
+
+    ~Tableau() {
+        if (enableVariableNames) {
+            varIDs.clear();
+            delete[] varNames;
+        }
+    }
+
+    void AddVarNames(std::vector<std::string> initVarNames) {
+        if (enableVariableNames) {
+            delete[] varNames;
+            varIDs.clear();
+        }
+        enableVariableNames = true;
+        varNames = new std::string[numVar];
+        for (size_t i = 0; i < numVar; i++) {
+            varNames[i] = initVarNames[i];
+            varIDs[varNames[i]] = i;
+        }
+    }
+
+    void AddVarNames(std::string* initVarNames) {
+        if (enableVariableNames) {
+            delete[] varNames;
+            varIDs.clear();
+        }
+        enableVariableNames = true;
+        varNames = initVarNames;
+        for (size_t i = 0; i < numVar; i++) {
+            varIDs[varNames[i]] = i;
+        }
+    }
+
+    std::string TableauToString() {
+        return TableauToTerminalString();
+    }
+
+    std::string TableauToMarkdownString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+
+        std::stringstream ss;
+        ss << "$\\begin{array}{c|";
+        for (size_t i = 0; i < numVar; i++) {
+            ss << "c";
+        }
+        ss << "|c}\nBASIS & ";
+        for (size_t i = 0; i < numVar; i++) {
+            ss << varNames[i] << " & ";
+        }
+        ss << "CONSTANT \\\\\n\\hline ";
+        for (size_t i = 0; i < numConstr; i++) {
+            ss << varNames[basisVars[i]];
+            for (size_t j = 0; j < tableauWidth; j++) {
+                size_t ii = i * tableauWidth + j;
+
+                ss << " & " << tableauBody[ii];
+            }
+            ss << "\\\\\n";
+        }
+        ss << "\\hline ";
+        for (size_t j = 0; j < tableauWidth; j++) {
+            size_t ii = numConstr * tableauWidth + j;
+
+            ss << " & " << tableauBody[ii];
+        }
+        ss << "\\\\\n\\end{array}$";
+
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
+
+        return ss.str();
+    }
+
+    std::string TableauToCSVString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+
+        std::stringstream ss;
+        ss << "BASIS, |, ";
+        for (size_t i = 0; i < numVar; i++) {
+            ss << varNames[i] << ", ";
+        }
+        ss << "|, CONSTANT \n";
+
+        for (size_t i = 0; i < numVar+2; i++) {
+            ss << "-, ";
+        }
+        ss << "\n";
+
+        for (size_t i = 0; i < numConstr; i++) {
+            ss << varNames[basisVars[i]] << ", |";
+            for (size_t j = 0; j < tableauWidth; j++) {
+                size_t ii = i * tableauWidth + j;
+
+                if (j == tableauWidth-2) {
+                    ss << ", |";
+                }
+                ss << ", " << tableauBody[ii];
+            }
+            ss << "\n";
+        }
+        
+        for (size_t i = 0; i < numVar+2; i++) {
+            ss << "-, ";
+        }
+        ss << "\n , , |";
+
+        for (size_t j = 0; j < tableauWidth; j++) {
+            size_t ii = numConstr * tableauWidth + j;
+
+            if (j == tableauWidth-2) {
+                    ss << ", |";
+                }
+
+            ss << ", " << tableauBody[ii];
+        }
+        ss << "\n";
+
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
+
+        return ss.str();
+    }
+
+    std::string FormatString(const std::string& str, size_t width) {
+        size_t numSpaces;
+        if (width < str.length()) {
+            numSpaces = 0; //Otherwise the will silently overflow since size_t can't be negative.
+        }
+        else {
+            numSpaces = width - str.length();
+        }
+        size_t numFirstHalf = numSpaces / 2;
+        size_t numSecondHalf = numSpaces - numFirstHalf;
+
+        std::stringstream ss;
+        for (size_t i = 0; i < numFirstHalf; i++) {
+            ss << " ";
+        }
+        ss << str;
+        for (size_t i = 0; i < numSecondHalf; i++) {
+            ss << " ";
+        }
+        return ss.str();
+    }
+
+    std::string FormatScalar(const Scalar& num, size_t width, size_t precision = 6) {
+        std::stringstream ss;
+        ss.precision(precision);
+        bool addNeg = false;
+        if (std::signbit(num)) {
+            if (num == 0) {
+                ss << -num;
+                addNeg = false;
+            }
+            else {
+                ss << -num;
+                addNeg = true;
+            }
+        }
+        else{
+            ss << num;
+        }
+
+        std::string str = FormatString(ss.str(),width);
+        if (addNeg) {
+            size_t startIndex = -1;
+            for (size_t i = 0; i < str.length(); i++) {
+                if (str.at(i) != ' ') {
+                    startIndex = i;
+                    break;
+                }
+            }
+
+            str.replace(startIndex-1,1,"-");
+        }
+        return str;
+    }
+
+    std::string FormatSizeT(size_t num, size_t width) {
+        std::stringstream ss;
+        ss << num;
+        std::string str = FormatString(ss.str(),width);
+
+        return str;
+    }
+
+    std::string TableauToTerminalString() {
+        if (!enableVariableNames) {
+            varNames = new std::string[numVar];
+            for (size_t i = 0; i < numVar; i++) {
+                varNames[i] = std::to_string(i);
+            }
+        }
+        
+        size_t cellWidth = 10;
+        for (size_t i = 0; i < numVar; i++) {
+            if (varNames[i].length() > cellWidth) {
+                cellWidth = varNames[i].length() + 2;
+            }
+        }
+        for (size_t i = 0; i < tableauHeight * tableauWidth; i++) {
+            std::stringstream ss;
+            ss.precision(6);
+            ss << tableauBody[i];
+            std::string str = ss.str();
+            if (str.length() + 2 > cellWidth) {
+                cellWidth = str.length() + 2;
+            }
+        }
+
+        const std::string vertBar = " | ";
+        const std::string horiBar(cellWidth * (tableauWidth + 1) + 2 * vertBar.length(), '-');
+
+        std::stringstream ss;
+
+        ss << FormatString("BASIS",cellWidth) << vertBar;
+        for (size_t i = 0; i < numVar; i++) {
+            ss << FormatString(varNames[i],cellWidth);
+        }
+        ss << vertBar << "CONSTANT\n" << horiBar << "\n";
+
+        for (size_t i = 0; i < numConstr; i++) {
+            ss << FormatString(varNames[basisVars[i]],cellWidth) << vertBar;
+            for (size_t j = tableauWidth * i; j < tableauWidth * (i+1) - 1; j++) {
+                ss << FormatScalar(tableauBody[j],cellWidth);
+            }
+            ss << vertBar << FormatScalar(tableauBody[tableauWidth * (i+1) - 1],cellWidth) << "\n";
+        }
+
+        ss << horiBar << "\n";
+        for (size_t i = 0; i < cellWidth; i++) {
+            ss << " ";
+        }
+        ss << vertBar;
+
+        for (size_t j = tableauWidth * (tableauHeight-1); j < tableauWidth * tableauHeight - 1; j++) {
+            ss << FormatScalar(tableauBody[j],cellWidth);
+        }
+        ss << vertBar << FormatScalar(tableauBody[tableauWidth * tableauHeight - 1],cellWidth) << "\n";
+
+        
+        if (!enableVariableNames) {
+            delete[] varNames;
+        }
+
+        return ss.str();
+    }
+}
+
+class SimplexSolver {
+protected:
+    Tableau tableau;
+    BasicTableau<FormatingRelationship> initialTableauInfo;
+    BasicTableau<FormatingRelationship> sfTableauInfo;
+    
+    size_t numBaseVar = 0;
+
     bool modelEngaged = false;
     std::chrono::time_point<clock_> tic_time;
     Scalar SCALAR_INF = 0;
     size_t SIZE_T_INF = 0;
-    size_t bottomRowStart = 0;
-    size_t bottomRowEnd = 0;
-    size_t lastColStart = 0;
-    size_t lastColEnd = 0;
-    bool pointerOwnership = true;
-    bool enableVariableNames = true;
+    
     bool auxProblemSolved = false;
     bool maximizationProblem = true;
 
@@ -83,6 +469,15 @@ protected:
     static const size_t CONSTR_EQ = 0;
     static const size_t CONSTR_LEQ = 1;
     static const size_t COSNTR_GEQ = 2;
+
+    Scalar* shiftValues;
+    bool* invertStatus;
+    int* augmented_OldToNew_Index;
+    int* augmented_NewToOld_Index;
+    int* duplicatedConstr_OldToNew_Index;
+    int* duplicatedConstr_NewToOld_Index;
+    
+
     
 public:
     SimplexSolver() {
@@ -109,10 +504,12 @@ public:
         size_t& initNumVar,
         size_t& initNumConstr,
         std::vector<std::string>& initVarNames,
-        std::vector<Scalar>& initA,
-        std::vector<Scalar>& initB,
-        std::vector<Scalar>& initC,
-        std::vector<size_t>& constrTypes,
+        std::vector<Scalar> initA, //This is intentionally passed by value since we change some of it's value when converting to standard form.
+        std::vector<Scalar> initB, //This is intentionally passed by value since we change some of it's value when converting to standard form.
+        std::vector<Scalar> initC, //This is intentionally passed by value since we change some of it's value when converting to standard form.
+        std::vector<size_t> constrTypes, //This is intentionally passed by value since we change some of it's value when converting to standard form.
+        std::vector<std::pair<Scalar,Scalar>> initBounds, //This is intentionally passed by value since we change some of it's value when converting to standard form.
+        std::vector<std::pair<bool,bool>>& initBoundActivations,
         bool initMaximization
         ) {
         if (modelEngaged) {
@@ -127,12 +524,134 @@ public:
 
         maximizationProblem = initMaximization;
 
-        //First, we need to deal with the different constraint types
+        //Re-write the problem into a stardard form talbeau
+
+        //1: Compute Tableau Size
+        //This is involve adding a number of additional variables and constraints.
+        //So to start, I'll calculate the number of additional variables and constraints that I need.
+        numBaseVar = initNumVar;
+
+        //1.1: Now deal with the variable bounds
+        shiftValues = new Scalar[initNumVar];
+        invertStatus = new bool[initNumVar];
+        augmented_OldToNew_Index = new int[initNumVar];
+        size_t numAugmentedVariables = 0;
+        size_t numActiveUpperBounds = 0;
+
+        for (size_t i = 0; i < initNumVar; i++) {
+            shiftValues[i] = 0;
+            invertStatus[i] = false;
+            augmented_OldToNew_Index[i] = -1;
+
+            Scalar lowerBound = initBounds[i].first;
+            Scalar upperBound = initBounds[i].second;
+
+            bool hasLowerBound = initBoundActivations[i].first;
+            bool hasUpperBound = initBoundActivations[i].second;
+
+            if (hasLowerBound) {
+                //We'll shift the definition of this value so that it's lower bound is zero.
+                //So we don't have to add any constraints or variables.
+                /*
+                Example:
+                    -5*x1 + 2*x2 <= 2
+                    2 <= x1 <= 3
+
+                    Becomes
+                    -5*x1' + 2*x2 <= -8
+                    0 <= x1' <= 1
+
+                    Here, the shift value would be -2 since x1' = x1 - 2
+
+                    Note that we'll also need to multiply this whole equation by -1 in order to maintain standard form.
+                */
+                if (lowerBound != 0) {
+                    for (size_t j = 0; j < initNumConstr; j++) {
+                        initB[j] += lowerBound * initA[j * initNumVar + i];
+                    }
+
+                    initC[initNumVar] += lowerBound * initC[i];
+                    
+                    shiftValues[i] = -lowerBound;
+                    initBounds[i].first = 0;
+                }
+
+                if (hasUpperBound) {
+                    //We'll have to add a constraint to specify this upper bound.
+                    numActiveUpperBounds++;
+                    initBounds[i].second -= lowerBound; //This must still be postiive so it's still properly formated to be put as a constraint later.
+                }
+                else {
+                    //Standard form assumes no upper bound, so we don't need to do anything here.
+                }
+            }
+            else {
+                if (hasUpperBound) {
+                    //We'll simulate a lower bound by multiplying by negative 1 and then shifting the new lower bound to zero.
+                    //So we don't have to add any constraints or variables.
+
+                    /*
+                    Example:
+                    3*x1 + 2*x2 <= 1
+                    x <= 3
+
+                    Becomes
+                    -3*x1' + 2*x2 <= -8
+                    x1' >= 0
+
+                    Here, the invertStatus would be true and the shift value would be 3 since x1' = -x1 + 3
+
+                    Note that we don't need to adda constraint here since x1' is already in standard form.
+                    Also note that we'll need to multiply this whole equation by -1 in order to maintain standard form.
+                    */
+                    initC[initNumVar] -= upperBound * initC[i];
+                    initC[i] *= -1;
+                    for (size_t j = 0; j < initNumConstr; j++) {
+                        initB[j] -= upperBound * initA[j * initNumVar + i];
+                        initA[j * initNumVar + i] *= -1;
+                    }
+                    shiftValues[i] = upperBound;
+                    invertStatus[i] = true;
+                    initBounds[i].first = 0;
+                    initBoundActivations[i].first = true;
+                    initBoundActivations[i].second = false;
+                }
+                else {
+                    //There are no bounds to shift. So we'll have to create a new variable with the same but opposite coefficients to simulate the negative behavior of this variable.
+                    //But since both variables will have bounds at zero, we don't need to add any constraints.
+                    augmented_OldToNew_Index[i] = initNumVar + numAugmentedVariables;
+                    numAugmentedVariables++;
+                }
+            }
+        }
+
+        //1.1.1: Some of the variable shifts may have caused some b vector values to become negative. If this is the case, we must multiply the entire constraint by negative one and change the inequality constraitn type.
+        for (size_t j = 0; j < initNumConstr; j++) {
+            if (initB[j] < 0) {
+                for (size_t i = 0; i < initNumVar; i++) {
+                    initA[j * initNumVar + i] *= -1;
+                }
+                initB[j] *= -1
+
+                if (constrTypes[j] == CONSTR_LEQ) {
+                    constrTypes[j] = COSNTR_GEQ;
+                }
+                else if (constrTypes[j] == COSNTR_GEQ) {
+                    constrTypes[j] = CONSTR_LEQ;
+                }
+            }
+        }
+
+
+        //1.2: Now deal with the different constraint types in the original A matrix
+        duplicatedConstr_OldToNew_Index = new int*[initNumConstr];
         size_t numLEQ = 0;
         size_t numGEQ = 0;
         size_t numEQ = 0;
         for (size_t i = 0; i < initNumConstr; i++) {
+            duplicatedConstr_OldToNew_Index[i] = -1;
             if (constrTypes[i] == CONSTR_EQ) {
+                duplicatedConstr_OldToNew_Index[i] = initNumConstr + numEQ;
                 numLEQ++;
                 numGEQ++;
                 numEQ++;
@@ -145,81 +664,276 @@ public:
             }
         }
 
-        numVar = initNumVar + numLEQ + 2 * numGEQ;
-        numBaseVar = initNumVar;
-        numConstr = initNumConstr + numEQs;
+        //Each LEQ has a slack var
+        //Each GEQ has a surplus var and an artificial var
+        //Each augmented variable must be added
+        //Each active upper bound will have a slack var.
+        size_t numSlackSurplus = initNumConstr + numEQ + numActiveUpperBounds;
+        size_t numArtificialVars = numGEQ;
 
+        size_t numAdditionalVars = numAugmentedVariables + numSlackSurplus + numArtificialVars;
+        size_t numAdditionalConstrs = numEQ + numActiveUpperBounds;
+        
         if (numGEQ > 0) {
             //This indicates that we'll need to sovle the auxilary problem first and then the normal problem
             //Solving the auxilary problem involves including the initial objective with it's function as a constraint.
             auxProblemSolved = false;
-            numVar += 1;
-            //numConstr += 1;
-            TODO: //VERIFY that this is implemented correctly in the next few blocks. I don't think I was accounting for the original obj func variable in the next few blocks, so I'll remove it here.
+            numAdditionalVars++;
+            numAdditionalConstrs++;
         }
         else {
             //This indicates that each of the LEQ's slack vars form the initial basis. We don't need to solve the auxilary problem
             auxProblemSolved = true;
         }
 
-        tableauHeight = numConstr + 1;
-        tableauWidth = numVar + 1;
-        tableauBody = new Scalar[tableauWidth * tableauHeight];
+        size_t numVar = initNumVar + numAdditionalVars;
+        
+        size_t numConstr = initNumConstr + numAdditionalConstrs;
 
+        tableau = Tableau(numVar,numConstr);
+        
 
+        //2: Now generate the variable names
         enableVariableNames = true;
-        varNames = new std::string[numVar];
-        //First, load the original variables
+        varNames = new std::string[numVar]; //The deleting of this array is handled by the tableau.
+        //2.1: First, load the original variables
         for (size_t i = 0; i < initNumVar; i++) {
             varNames[i] = initVarNames[i];
             varIDs[varNames[i]] = i;
         }
-        //Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
-        std::string baseSlackVarName = "SLACK_VAR_";
-        for (size_t i = 0; i < numConstr; i++) {
-            varNames[numBaseVar + i] = baseSlackVarName + std::to_string(i);
+        //2.2: Now create the augmented negative variables from when a variable does not have a bounds.
+        for (size_t i = 0; i < initNumVar; i++) {
+            if (augmented_OldToNew_Index[i] != -1) {
+                varNames[augmented_OldToNew_Index[i]] = "-(" + varNames[i] + ")";
+            }
         }
-        //Now create the artificial variables. These will be indexed in sequence following the slack variables.
+
+        //2.2: Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
+        std::string baseSlackVarName = "SLACK_VAR_";
+        for (size_t i = 0; i < numSlackSurplus; i++) {
+            varNames[numBaseVar + numAugmentedVariables + i] = baseSlackVarName + std::to_string(i);
+        }
+        //2.3: Now create the artificial variables. These will be indexed in sequence following the slack variables.
         std::string baseArtVarNAme = "ARTIF_VAR_";
         for (size_t i = 0; i < numGEQ; i++) {
-            varNames[numBaseVar + numConstr + i] = baseArtVarNAme + std::to_string(i);
+            varNames[numBaseVar + numAugmentedVariables + numConstr + i] = baseArtVarNAme + std::to_string(i);
         }
-        //If artificial variables are present, the last variable will the objective of the original problem.
+        //2.4: If artificial variables are present, the last variable will the objective of the original problem.
         if (numGEQ > 0) {
-            varNames[numBaseVar + numConstr + numGEQ] = "ORIG_OBJ_FUNC";
+            varNames[numBaseVar + numAugmentedVariables + numConstr + numGEQ] = "ORIG_OBJ_FUNC";
         }
 
-        //Now populate the talbleau body.
-        //First, the original A matrix.
-        size_t numEQEncountered = 0;
+        tableau.AddVarNames(varNames);
+
+
+        augmented_NewToOld_Index = new int[numVar];
+        for (size_t i = 0; i < numVar; i++) {
+            augmented_NewToOld_Index[i] = -1;
+        }
+        for (size_t oldI = 0; oldI < initNumVar; oldI++) {
+            if (augmented_OldToNew_Index[oldI] != -1) {
+                augmented_NewToOld_Index[augmented_OldToNew_Index[oldI]] = oldI;
+            }
+        }
+
+        duplicatedConstr_NewToOld_Index = new int[numConstr];
+        for (size_t i = 0; i < numConstr; i++) {
+            duplicatedConstr_NewToOld_Index[i] = -1;
+        }
+        for (size_t oldI = 0; oldI < initNumConstr; oldI++) {
+            if (duplicatedConstr_OldToNew_Index[oldI] != -1) {
+                duplicatedConstr_NewToOld_Index[duplicatedConstr_OldToNew_Index[oldI]] = oldI;
+            }
+        }
+
+
+        //3: Now populate the talbleau body.
+
+        /* The tableau will look like this:
+            |~ Original Vars ~|~ Augmented Vars ~|~ Slack/Surplus Vars ~|~ Artificial Vars ~|~ Original Objective Var ~|~ Constant Column ~|      Explaination:
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        A        |        A'        |         +- I         |         I         |            0             |         b         |  Original Model Equations with appropraite augmented, slack, surplus, and artificial variables added.
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        A''      |        A'''      |         +- I'        |         I'        |            0             |         b'        |  Duplicated Model Equations for replacing each EQ constraint with a LEQ and a GEQ constraint.
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        I        |        0         |           I          |         0         |            0             |       Bounds      |  Variable Bound Enforcement
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        c        |        c'        |           0          |         0         |            1             |        c[-1]      |  Original Objective Function
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |      sum(A)     |     sum(A')      |       -1 or 0        |         0         |            0             |       sum(c)      |  Auxilary Objective Function
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+
+            Where A, b, and c are the original A, b, and c Matrix / vectors.
+            A' and c' are the negative A and c coefficients for each augmented variable.
+            I indicates the identity matrix.
+            A'', A''', I', and b' are the appropriate variations of A, I, and b for each equality constraint that was duplicated into a GEQ and LEQ constraint.
+
+            I'll handle each region below. Regions are labeled as follows:
+            |~ Original Vars ~|~ Augmented Vars ~|~ Slack/Surplus Vars ~|~ Artificial Vars ~|~ Original Objective Var ~|~ Constant Column ~|
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        11       |        12        |           13         |         14        |            15            |         16        |
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        21       |        22        |           23         |         24        |            25            |         26        |
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        31       |        32        |           33         |         34        |            35            |         36        |
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        41       |        42        |           43         |         44        |            45            |         46        |
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+            |        51       |        52        |           53         |         54        |            55            |         56        |
+            |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
+        */
+
+        //3.1 Original Model Eqations
+        //3.1.1 REGION 11, Original A matrix (accounting for shifted and inverted variables)
         for (size_t i = 0; i < initA.size(); i++) {
-            //First, find the 2-D indices of the original A matrix.
-            size_t ii = i / numVar; //Constraint Index
-            size_t jj = i - ii * numVar; //Variable Index
+            //Cast the one-dimensional index, i, into two dimensional indices ii and jj
+            size_t ii = i / initNumVar;
+            size_t jj = i - ii;
 
-            //Now map those 2-D indices to the 2-D indices of the tableau.
-            //jj remains the same since original variables come first in variable order
-            //ii remains the same except it is repeated if a constraint is an equality constraint. 
-            bool thisIsAnEQConstr = constrTypes[ii] == CONSTR_EQ;
+            tableau[ii,jj] = initA[i]; //Shift and invert operations were written to initA earlier.
+        }
 
-            //Thus, we need to shift ii forward the number of equality constraints we already encountered.
-            ii += numEQEncountered;
-
-            size_t j = ii * tableauWidth + jj;
-            tableauBody[j] = initA[i];
-
-            if (thisIsAnEQConstr) {
-                //Repeat this value on the next row if this is an EQConstr.
-                ii++;
-                j = ii * tableauWidth + jj;
-                tableauBody[j] = initA[i];
-            }
-
-            //Only iterate numEQEncountered after we've totally finished a given row.
-            if ((jj == initNumVar - 1) && (thisIsAnEQConstr)) {
-                numEQEncountered++;
+        //3.1.2 REGION 12, Augmented variables model equation coefs.
+        size_t jStart = initNumVar;
+        size_t jStop = initNumVar + numAugmentedVariables; //numEQ added since this region (along with region 23 should be square)
+        for (size_t newJ = jStart; newJ < jStop; j++) {
+            size_t oldJ = (size_t) augmented_NewToOld_Index[newJ];
+            for (size_t i = 0; i < initNumConstr; i++) {
+                tableau[i,newJ] = -tableau[i,oldJ]; //Negative since the augmented variable (being a positive Scalar) represents the negative values of the original variable.
             }
         }
+
+        //3.1.3 REGION 13, Slack/Surplus variables in the original model equations
+        jStart = initNumVar + numAugmentedVariables;
+        jStop = jStart + numSlackSurplus; //numEQ added since this region (along with region 23 should be square)
+        for (size_t i = 0; i < initNumConstr; i++) {
+            for (size_t j = jStart; j < jStop; j++) { 
+                tableau[i,j] = 0; //One repeated "assignment" operation is faster than n "if" operations. So I'll just assign all zeros and then re-asign the one non-zero value.
+            }
+
+            if (constrTypes[i] == COSNTR_GEQ) {
+                tableau[i,jStart + i] = -1; 
+            }
+            else {
+                //The LEQ produced from each EQ will be listed in the original position. The GEQ produced will be placed in Regions 21-26.
+                tableau[i,jStart + i] = 1;
+            }
+        }
+
+        //3.1.4 REGION 14, Artificial variables in the original model equations.
+        
+        jStart = initNumVar + numAugmentedVariables + numSlackSurplus;
+        jStop = jStart + numArtificialVars;
+        size_t numGEQEncountered = 0;
+        for (size_t i = 0; i < initNumConstr; i++) {
+            for (size_t j = jStart; j < jStop; j++) {
+                tableau[i,j] = 0; //One repeated "assignment" operation is faster than n "if" operations. So I'll just assign all zeros and then re-asign the one non-zero value.
+            }
+
+            if (constrTypes[i] == COSNTR_GEQ) {
+                tableau[i,jStart + numGEQEncountered] = 1; 
+                numGEQEncountered++;
+            }
+        }
+
+        //3.1.5 REGION 15, Original Objective Function coefs in the original model equations.
+        if (!auxProblemSolved) {
+            size_t j = initNumVar + numAugmentedVariables + numSlackSurplus+ numArtificialVars;
+            for (size_t i = 0; i < initNumConstr; i++) {
+                tableau[i,j] = 0;
+            }
+        }
+
+        //3.1.6 REGION 16, Constants in the original model equations (adjusted by variable shifts and inverts, handled earlier)
+        size_t j = tableauWidth - 1;
+        for (size_t i = 0; i < initNumConstr; i++) {
+            tableau[i,j] = initC[i];
+        }
+
+        //3.2 Duplated Equality Constraints
+        //3.2.1 REGION 21 & 22, Coefs of the original and augmented variables in the model equality constraints (adjusted for variable shifts and inverts) that are duplicated.
+        size_t iStart = initNumConstr;
+        size_t iStop = initNumConstr + numEQ;
+        for (size_t newI = iStart; newI < iStop; newI++) {
+            size_t oldI = (size_t) duplicatedConstr_NewToOld_Index[newI];
+            for (size_t j = 0; j < initNumVar + numAugmentedVariables; j++) {
+                tableau[newI,j] = tableau[oldI,j];
+            }
+        }
+
+        //3.2.2 REGION 23, Surplus Variables for each of the duplicated equality constraints.
+        jStart = initNumVar + numAugmentedVariables;
+        jStop = initNumVar + numAugmentedVariables + initNumConstr + numEQ;
+        for (size_t i = iStart; i < iStop; i++) {
+            for (size_t j = jStart; j < jStop; j++) {
+                tableau[i,j] = 0;
+            }
+            tableau[i,jStart + i] = -1; //Since all of these duplicated constraints are GEQ constraints.
+        }
+
+        //3.2.3 REGION 24, Artificial variables for each of the duplicated equality constraints.
+        //Same iStart and iStop as REGION 23
+        jStart = initNumVar + numAugmentedVariables + initNumConstr + numEQ;
+        jStop = jStart + numArtificialVars;
+        for (size_t i = iStart; i < iStop; i++) {
+            for (size_t j = jStart; j < jStop; j++) {
+                tableau[i,j] = 0;
+            }
+            tableau[i,jStart + numGEQEncountered] = 1; //Since all of these constraints are GEQ constraints.
+            numGEQEncountered++;
+        }
+
+        //3.2.4 REGION 25 Original objective function variable in the duplicated equality constraints.
+        if (!auxProblemSolved) {
+            size_t j = initNumVar + initNumConstr + numEQ + numArtificialVars;
+            for (size_t i = iStart; i < iStop; i++) {
+                tableau[i,j] = 0;
+            }
+        }
+
+        //3.2.5 REGION 26 Constant column for the duplicated equality constraints.
+        j = tableauWidth - 1;
+        for (size_t newI = iStart; newI < iStop; newI++) {
+            size_t oldI = (size_t) duplicatedConstr_NewToOld_Index[newI];
+            talbeau[newI,j] = tableau[oldI,j];
+        }
+
+        //3.3 Variable Bound Enforcement (REGIONs 31-36)
+        size_t numUpperBoundsEncountered = 0;
+        iStart = initNumConstr + numEQ;
+        jStart = initNumVar + numAugmentedVariables + initNumConstr + numEQ;
+        for (size_t i = 0; i < initNumVar; i++) { 
+            //Remember, an augmented variable will only exist if the variable (after shifting and inverting) has no upper bound. So we don't need to inlude augmented variables here.
+            //Additionally, after shifting, inteverting, and/or augmenting each variable, all variables' lower bound is 0 which is assumed by standard form.
+            //So we don't need to explicitly state any lower bounds here.
+            if (initBoundActivations[i].second) { //If this variable has an upper bound.
+                size_t rowIndex = iStart + numUpperBoundsEncountered;
+                auto rowItr = tableau.RowIterator(rowIndex);
+                while (!rowItr.isEnd()) {
+                    *rowItr = 0;
+                    rowItr++;
+                }
+
+                Scalar upperBound = initBounds[i].second;
+                tableau[rowIndex,i] = 1;
+
+                size_t slackVarIndex = jStart + numUpperBoundsEncountered;
+                tableau[rowIndex,slackVarIndex] = 1;
+
+                talbeau[rowIndex,tableau.tableauWidth - 1] = upperBound;
+            }
+        }
+
+        //3.4 Orginal Objective Function (REGIONs 41-46)
+        
+
+        
+
+        
+
+
+        //EVERYTHING FROM HERE DOWN IS OLD CODE.
+
 
         //Now Fill in the Constant Column
         numEQEncountered = 0;
@@ -452,6 +1166,13 @@ public:
 
             modelOptimized = false;
             modelEngaged = false;
+
+            delete[] shiftValues;
+            delete[] invertStatus;
+            delete[] augmented_OldToNew_Index;
+            delete[] augmented_NewToOld_Index;
+            delete[] duplicatedConstr_OldToNew_Index;
+            delete[] duplicatedConstr_NewToOld_Index;
         }
     }
 
@@ -461,233 +1182,6 @@ public:
 
     void setMaxTime(Scalar newMaxTime) {
         maxTime = newMaxTime;
-    }
-
-    std::string TableauToString() {
-        return TableauToTerminalString();
-    }
-
-    std::string TableauToMarkdownString() {
-        if (!enableVariableNames) {
-            varNames = new std::string[numVar];
-            for (size_t i = 0; i < numVar; i++) {
-                varNames[i] = std::to_string(i);
-            }
-        }
-
-        std::stringstream ss;
-        ss << "$\\begin{array}{c|";
-        for (size_t i = 0; i < numVar; i++) {
-            ss << "c";
-        }
-        ss << "|c}\nBASIS & ";
-        for (size_t i = 0; i < numVar; i++) {
-            ss << varNames[i] << " & ";
-        }
-        ss << "CONSTANT \\\\\n\\hline ";
-        for (size_t i = 0; i < numConstr; i++) {
-            ss << varNames[basisVars[i]];
-            for (size_t j = 0; j < tableauWidth; j++) {
-                size_t ii = i * tableauWidth + j;
-
-                ss << " & " << tableauBody[ii];
-            }
-            ss << "\\\\\n";
-        }
-        ss << "\\hline ";
-        for (size_t j = 0; j < tableauWidth; j++) {
-            size_t ii = numConstr * tableauWidth + j;
-
-            ss << " & " << tableauBody[ii];
-        }
-        ss << "\\\\\n\\end{array}$";
-
-        if (!enableVariableNames) {
-            delete[] varNames;
-        }
-
-        return ss.str();
-    }
-
-    std::string TableauToCSVString() {
-        if (!enableVariableNames) {
-            varNames = new std::string[numVar];
-            for (size_t i = 0; i < numVar; i++) {
-                varNames[i] = std::to_string(i);
-            }
-        }
-
-        std::stringstream ss;
-        ss << "BASIS, |, ";
-        for (size_t i = 0; i < numVar; i++) {
-            ss << varNames[i] << ", ";
-        }
-        ss << "|, CONSTANT \n";
-
-        for (size_t i = 0; i < numVar+2; i++) {
-            ss << "-, ";
-        }
-        ss << "\n";
-
-        for (size_t i = 0; i < numConstr; i++) {
-            ss << varNames[basisVars[i]] << ", |";
-            for (size_t j = 0; j < tableauWidth; j++) {
-                size_t ii = i * tableauWidth + j;
-
-                if (j == tableauWidth-2) {
-                    ss << ", |";
-                }
-                ss << ", " << tableauBody[ii];
-            }
-            ss << "\n";
-        }
-        
-        for (size_t i = 0; i < numVar+2; i++) {
-            ss << "-, ";
-        }
-        ss << "\n , , |";
-
-        for (size_t j = 0; j < tableauWidth; j++) {
-            size_t ii = numConstr * tableauWidth + j;
-
-            if (j == tableauWidth-2) {
-                    ss << ", |";
-                }
-
-            ss << ", " << tableauBody[ii];
-        }
-        ss << "\n";
-
-        if (!enableVariableNames) {
-            delete[] varNames;
-        }
-
-        return ss.str();
-    }
-
-    std::string FormatString(const std::string& str, size_t width) {
-        size_t numSpaces;
-        if (width < str.length()) {
-            numSpaces = 0; //Otherwise the will silently overflow since size_t can't be negative.
-        }
-        else {
-            numSpaces = width - str.length();
-        }
-        size_t numFirstHalf = numSpaces / 2;
-        size_t numSecondHalf = numSpaces - numFirstHalf;
-
-        std::stringstream ss;
-        for (size_t i = 0; i < numFirstHalf; i++) {
-            ss << " ";
-        }
-        ss << str;
-        for (size_t i = 0; i < numSecondHalf; i++) {
-            ss << " ";
-        }
-        return ss.str();
-    }
-
-    std::string FormatScalar(const Scalar& num, size_t width, size_t precision = 6) {
-        std::stringstream ss;
-        ss.precision(precision);
-        bool addNeg = false;
-        if (std::signbit(num)) {
-            if (num == 0) {
-                ss << -num;
-                addNeg = false;
-            }
-            else {
-                ss << -num;
-                addNeg = true;
-            }
-        }
-        else{
-            ss << num;
-        }
-
-        std::string str = FormatString(ss.str(),width);
-        if (addNeg) {
-            size_t startIndex = -1;
-            for (size_t i = 0; i < str.length(); i++) {
-                if (str.at(i) != ' ') {
-                    startIndex = i;
-                    break;
-                }
-            }
-
-            str.replace(startIndex-1,1,"-");
-        }
-        return str;
-    }
-
-    std::string FormatSizeT(size_t num, size_t width) {
-        std::stringstream ss;
-        ss << num;
-        std::string str = FormatString(ss.str(),width);
-
-        return str;
-    }
-
-    std::string TableauToTerminalString() {
-        if (!enableVariableNames) {
-            varNames = new std::string[numVar];
-            for (size_t i = 0; i < numVar; i++) {
-                varNames[i] = std::to_string(i);
-            }
-        }
-        
-        size_t cellWidth = 10;
-        for (size_t i = 0; i < numVar; i++) {
-            if (varNames[i].length() > cellWidth) {
-                cellWidth = varNames[i].length() + 2;
-            }
-        }
-        for (size_t i = 0; i < tableauHeight * tableauWidth; i++) {
-            std::stringstream ss;
-            ss.precision(6);
-            ss << tableauBody[i];
-            std::string str = ss.str();
-            if (str.length() + 2 > cellWidth) {
-                cellWidth = str.length() + 2;
-            }
-        }
-
-        const std::string vertBar = " | ";
-        const std::string horiBar(cellWidth * (tableauWidth + 1) + 2 * vertBar.length(), '-');
-
-        std::stringstream ss;
-
-        ss << FormatString("BASIS",cellWidth) << vertBar;
-        for (size_t i = 0; i < numVar; i++) {
-            ss << FormatString(varNames[i],cellWidth);
-        }
-        ss << vertBar << "CONSTANT\n" << horiBar << "\n";
-
-        for (size_t i = 0; i < numConstr; i++) {
-            ss << FormatString(varNames[basisVars[i]],cellWidth) << vertBar;
-            for (size_t j = tableauWidth * i; j < tableauWidth * (i+1) - 1; j++) {
-                ss << FormatScalar(tableauBody[j],cellWidth);
-            }
-            ss << vertBar << FormatScalar(tableauBody[tableauWidth * (i+1) - 1],cellWidth) << "\n";
-        }
-
-        ss << horiBar << "\n";
-        for (size_t i = 0; i < cellWidth; i++) {
-            ss << " ";
-        }
-        ss << vertBar;
-
-        for (size_t j = tableauWidth * (tableauHeight-1); j < tableauWidth * tableauHeight - 1; j++) {
-            ss << FormatScalar(tableauBody[j],cellWidth);
-        }
-        ss << vertBar << FormatScalar(tableauBody[tableauWidth * tableauHeight - 1],cellWidth) << "\n";
-
-        
-        if (!enableVariableNames) {
-            delete[] varNames;
-        }
-
-        return ss.str();
     }
 
     bool LessThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {

@@ -179,9 +179,12 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         recurseC = self._recurseExprTree(modelData._obj[0].expr,varNames)
 
         c = np.append(recurseC[0],recurseC[1])
-        
-        if modelData._obj[0].sense == pyo.minimize:
-            c *= -1
+
+        #Collect all variable bounds.
+        bounds = [var.bounds for var in modelData._var]
+        boundActivations = [tuple([b != None for b in var.bounds]) for var in modelData._var]
+
+        maximizationProblem = modelData._obj[0].sense == pyo.maximize
 
         #Now pass these matrices to C++        
         if self.currentOptions["Basis_IO_Approach"] == "RC":
@@ -194,7 +197,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         if self.currentOptions["LiveUpdate"]:
             solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
 
-        solver.EngageModel(numVar,numConstr,varNames,b,c,constrTypes)
+        solver.EngageModel(numVar,numConstr,varNames,b,c,constrTypes,bounds,boundActivations,maximizationProblem)
         solver.Solve()
 
         logs = solver.GetLogs()
