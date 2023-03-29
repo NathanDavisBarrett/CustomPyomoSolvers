@@ -19,6 +19,8 @@
 #define LOG_WARN 1
 #define LOG_INFO 2
 
+#define TERMINATE 1234567890
+
 //from https://stackoverflow.com/questions/3767869/adding-message-to-assert
 #   define ASSERT(condition, message) \
     do { \
@@ -26,7 +28,7 @@
             log(LOG_ERROR,message); \
             std::cerr << "Assertion `" #condition "` failed in " << __FILE__ \
                       << " line " << __LINE__ << ": " << message << std::endl; \
-            std::terminate(); \
+            throw TERMINATE; \
         } \
     } while (false)
 
@@ -55,6 +57,10 @@ public:
     std::vector<std::map<size_t,Scalar>> varsAndVals;
     std::map<size_t, std::pair<Scalar,size_t>> valsAndRows;
 
+    Basis() {
+        size = 0;
+        complete = false;
+    }
 
     Basis(size_t initSize) {
         size = initSize;
@@ -132,6 +138,12 @@ public:
             throw INVALID_BASIS_REDUCTION_OPTION;
         }
     }
+
+    void Clear() {
+        constants = std::vector<Scalar>(size,-1.0);
+        varsAndVals = std::vector<std::map<size_t,Scalar>>(size);
+        complete = false;
+    }
 };
 
 template <typename T>
@@ -179,7 +191,7 @@ public:
         }
 
         bool isEnd() {
-            return index < end;
+            return index >= end;
         }
     };
 
@@ -234,19 +246,32 @@ public:
         return tableauBody[row * tableauWidth + col];
     }
 
-    Iterator ColumnIterator(size_t col) {
-        return Iterator(tableauBody, col, tableauWidth, tableauHeight * tableauWidth);
+    Iterator ColumnIterator(size_t col, bool includeObjRow = true) {
+        size_t numIter = tableauHeight * tableauWidth;
+
+        if (!includeObjRow) {
+            numIter -= tableauWidth;
+        }
+
+        return Iterator(tableauBody, col, tableauWidth, numIter);
     }
-    Iterator RowIterator(size_t row) {
-        return Iterator(tableauBody, row * tableauWidth, 1, (row + 1) * tableauWidth);
+
+    Iterator RowIterator(size_t row, bool includeConstCol = true) {
+        size_t numIter = (row + 1) * tableauWidth;
+
+        if (!includeConstCol) {
+            numIter -= 1;
+        }
+
+        return Iterator(tableauBody, row * tableauWidth, 1, numIter);
     }
 
     Iterator ObjRowIterator() {
-        return RowIterator(tableauHeight - 1);
+        return RowIterator(tableauHeight - 1,false);
     }
 
     Iterator ConstColIterator() {
-        return ColumnIterator(tableauWidth - 1);
+        return ColumnIterator(tableauWidth - 1,false);
     }
 
     T* getRawPtr() {
@@ -260,7 +285,7 @@ public:
     std::map<std::string, size_t> varIDs;
     bool enableVariableNames = true;
 
-    Basis* basis = NULL;
+    Basis basis;
 
     Tableau(size_t initNumVar, size_t initNumConstr, std::vector<std::string> initVarNames = {}): BasicTableau<Scalar>(initNumVar, initNumConstr) {
         if (initVarNames.size() > 0) {
@@ -276,19 +301,18 @@ public:
             varNames = NULL;
         }
 
-        basis = NULL;
+        basis = Basis(initNumConstr);
     }
 
     Tableau(size_t initNumVar, size_t initNumConstr, Scalar* initTableauBody): BasicTableau<Scalar>(initNumVar, initNumConstr, initTableauBody) {
         varNames = NULL;
         enableVariableNames = false;
-        basis = NULL;
+        basis = Basis(initNumConstr);
     }
 
     Tableau() {
         varNames = NULL;
         enableVariableNames = false;
-        basis = NULL;
     }
 
     ~Tableau() {
@@ -296,19 +320,18 @@ public:
             varIDs.clear();
             delete[] varNames;
         }
-        if (basis != NULL) {
-            delete[] basis;
-        }
+    }
+
+    bool BasisIsComplete() {
+        return basis.complete;
+    }
+
+    void CreateBasis() {
+        basis = Basis(numConstr);
     }
 
     void computeBasis(Scalar tollerance=1e-7) {
-        if (basis == NULL) {
-            basis = new Basis(numConstr);
-        }
-        else {
-            delete[] basis;
-            basis = new Basis(numConstr);
-        }
+        CreateBasis();
 
         for (size_t i = 0; i < tableauWidth-1; i++) {
             size_t numNonzeroEntries = 0;
@@ -332,11 +355,11 @@ public:
             ASSERT(numNonzeroEntries != 0,"Error! There is a zero column in the tableau.");
 
             if (numNonzeroEntries == 1) {
-                basis->AddEntry(i, rowIndex, nonZeroEntry, this->at(rowIndex, tableauWidth-1));
+                basis.AddEntry(i, rowIndex, nonZeroEntry, this->at(rowIndex, tableauWidth-1));
             }
         }
 
-        basis->complete = true;
+        basis.complete = true;
     }
 
     Scalar GetObjectiveValue() {
@@ -560,7 +583,7 @@ public:
         }
 
         const std::string vertBar = " | ";
-        const std::string horiBar(cellWidth * (tableauWidth + 1) + 2 * vertBar.length(), '-');
+        const std::string horiBar(cellWidth * (tableauWidth) + 2 * vertBar.length(), '-');
 
         std::stringstream ss;
 
@@ -600,6 +623,7 @@ public:
 #define STOPPED_AT_MAX_TIME 2
 #define UNBOUNDED 3
 #define INFEASIBLE 4
+#define UNDETERMINED_STATUS 5
 
 #define CONSTR_EQ 0
 #define CONSTR_LEQ 1
@@ -629,6 +653,9 @@ protected:
 
     size_t maxIter = 0;
     Scalar maxTime = 0;
+
+    size_t iterationNum = 0;
+    Scalar solveTime = 0;
 
     bool modelOptimized;
 
@@ -799,6 +826,7 @@ public:
             }
         }
 
+        
         //1.1.1: Some of the variable shifts may have caused some b vector values to become negative. If this is the case, we must multiply the entire constraint by negative one and change the inequality constraitn type.
         for (size_t j = 0; j < initNumConstr; j++) {
             if (initB[j] < 0) {
@@ -883,23 +911,22 @@ public:
             }
         }
 
-        //2.2: Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
+        //2.3: Now create the slack variables. Every constraint has a slack variable so they'll just be indexed in sequence starting after numBaseVar.
         std::string baseSlackVarName = "SLACK_VAR_";
         for (size_t i = 0; i < numSlackSurplusVars; i++) {
             varNames[numBaseVar + numAugmentedVariables + i] = baseSlackVarName + std::to_string(i);
         }
-        //2.3: Now create the artificial variables. These will be indexed in sequence following the slack variables.
+        //2.4: Now create the artificial variables. These will be indexed in sequence following the slack variables.
         std::string baseArtVarNAme = "ARTIF_VAR_";
         for (size_t i = 0; i < numGEQ; i++) {
-            varNames[numBaseVar + numAugmentedVariables + numConstr + i] = baseArtVarNAme + std::to_string(i);
+            varNames[numBaseVar + numAugmentedVariables + numSlackSurplusVars + i] = baseArtVarNAme + std::to_string(i);
         }
-        //2.4: If artificial variables are present, the last variable will the objective of the original problem.
+        //2.5: If artificial variables are present, the last variable will the objective of the original problem.
         if (numGEQ > 0) {
-            varNames[numBaseVar + numAugmentedVariables + numConstr + numGEQ] = "ORIG_OBJ_FUNC";
+            varNames[numVar - 1] = "ORIG_OBJ_FUNC";
         }
 
         tableau->AddVarNames(varNames);
-
 
         augmented_NewToOld_Index = new int[numVar];
         for (size_t i = 0; i < numVar; i++) {
@@ -923,7 +950,7 @@ public:
 
 
         //3: Now populate the tableau body.
-
+        
         /* The tableau will look like this:
             |~ Original Vars ~|~ Augmented Vars ~|~ Slack/Surplus Vars ~|~ Artificial Vars ~|~ Original Objective Var ~|~ Constant Column ~|      Explaination:
             |-----------------|------------------|----------------------|-------------------|--------------------------|-------------------|
@@ -963,7 +990,7 @@ public:
         for (size_t i = 0; i < initA.size(); i++) {
             //Cast the one-dimensional index, i, into two dimensional indices ii and jj
             size_t ii = i / initNumVar;
-            size_t jj = i - ii;
+            size_t jj = i - ii * initNumVar;
 
             tableau->at(ii,jj) = initA[i]; //Shift and invert operations were written to initA earlier.
         }
@@ -996,7 +1023,6 @@ public:
         }
 
         //3.1.4 REGION 14, Artificial variables in the original model equations.
-        
         jStart = initNumVar + numAugmentedVariables + numSlackSurplusVars;
         jStop = jStart + numArtificialVars;
         size_t numGEQEncountered = 0;
@@ -1247,7 +1273,7 @@ public:
     void DisengageModel() {
         if (modelEngaged) {
             if (pointerOwnership) {
-                delete[] tableau;
+                delete tableau;
                 delete[] shiftValues;
                 delete[] invertStatus;
                 delete[] augmented_OldToNew_Index;
@@ -1337,7 +1363,7 @@ public:
 
     size_t ComputePivotColumn(bool maximize) {
         size_t columnIndex = 0;
-        auto itr = tableau->ConstColIterator();
+        auto itr = tableau->ObjRowIterator();
         if (maximize) {
             Scalar minBottomVal = *itr;
             ++itr;
@@ -1432,21 +1458,21 @@ public:
     }
 
     Scalar GetVariableValue(size_t varIndex, size_t basisReductionOption = BASIS_REDUCTION_FIRST) {
-        if (!tableau->basis->complete) {
+        if (!tableau->BasisIsComplete()) {
             tableau->computeBasis();
         }
 
-        Scalar tableauValue = tableau->basis->GetVariableValue(varIndex, basisReductionOption);
+        Scalar tableauValue = tableau->basis.GetVariableValue(varIndex, basisReductionOption);
         Scalar augmentedValue = 0.0;
         bool augmented = false;
 
         if (augmented_OldToNew_Index[varIndex] != -1) {
-            augmentedValue = tableau->basis->GetVariableValue(augmented_OldToNew_Index[varIndex]);
+            augmentedValue = tableau->basis.GetVariableValue(augmented_OldToNew_Index[varIndex]);
             augmented = true;
         }
         else if (augmented_NewToOld_Index[varIndex] != -1) {
             augmentedValue = tableauValue;
-            tableauValue = tableau->basis->GetVariableValue(augmented_NewToOld_Index[varIndex]);
+            tableauValue = tableau->basis.GetVariableValue(augmented_NewToOld_Index[varIndex]);
 
             augmented = true;
         }
@@ -1465,8 +1491,7 @@ public:
     }
 
     Scalar GetVariableValue(std::string varName, size_t basisReductionOption = BASIS_REDUCTION_FIRST) {
-        ASSERT(tableau->enableVariableNames,"Error! You cannot get the variable values by name when variable names are not enabled. Use GetVariableValue(size_t index) instead.");
-
+        ASSERT(tableau->enableVariableNames,"Error! You cannot get variable values by name when variable names are not enabled. Use GetVariableValue(size_t index) instead.");
         if (!modelOptimized) {
             log(LOG_WARN,"Attempting to access the value of \"" + varName + "\" within a model that has not yet been optimized.");
         }
@@ -1495,7 +1520,7 @@ public:
         std::cout << "Itr: " << tableau->FormatSizeT(itr,10) << " Time: " << tableau->FormatScalar(time,15) << " Objective Value: " << GetObjectiveValue() << '\n';
     }
 
-    size_t SolveCurrentSetup(bool maximize, size_t& iterationNum, size_t& liveUpdateIterCounter, size_t& liveUpdateTimeCounter) {
+    size_t SolveCurrentSetup(bool maximize, size_t& liveUpdateIterCounter, size_t& liveUpdateTimeCounter) {
         //Make sure model is engaged before proceeding
         ASSERT(modelEngaged,"ERROR! Solver cannot execute if there is no model engaged.");
 
@@ -1505,7 +1530,6 @@ public:
 
         while (!solutionIsOptimal) {
             if (iterationNum > maxIter) {
-                exitCode = 1;
                 log(LOG_INFO,"Maximum number of Iterations Exceeded.");
                 exitCode = STOPPED_AT_MAX_ITER;
                 break;
@@ -1513,7 +1537,6 @@ public:
             iterationNum++;
             Scalar currentTime = toc();
             if (currentTime > maxTime) {
-                exitCode = 2;
                 log(LOG_INFO,"Maximum solve time exceeded.");
                 exitCode = STOPPED_AT_MAX_TIME;
                 break;
@@ -1540,6 +1563,8 @@ public:
                 switch (e) {
                     case UNBOUNDED:
                         log(LOG_ERROR,"The Model was proven to be unbounded.");
+                        exitCode = UNBOUNDED;
+                        break;
                     default:
                         throw e;
                 }
@@ -1561,20 +1586,28 @@ public:
     }
 
     void RemoveAuxilaryProblem() {
-        auto newTableau = new Tableau(numBaseVar + numAugmentedVariables + numSlackSurplusVars, numBaseConstr + numDuplicatedConstr + numActiveUpperBounds);
+        size_t newNumVars = numBaseVar + numAugmentedVariables + numSlackSurplusVars;
+        size_t newNumConstrs = numBaseConstr + numDuplicatedConstr + numActiveUpperBounds;
+        auto newTableau = new Tableau(newNumVars, newNumConstrs);
 
         //Copy all Original, Augmented, Slack, and Surplus variables across all model equations, duplicated model equations, variable bounds, and original objective funcion over to the new tableau.
         //REGIONS: 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43
         size_t jStart = 0;
-        size_t jStop = numBaseVar + numAugmentedVariables + numSlackSurplusVars;
+        size_t jStop = newNumVars;
         size_t iStart = 0;
-        size_t iStop = numBaseConstr + numDuplicatedConstr + numActiveUpperBounds + 1;
+        size_t iStop = newNumConstrs + 1;
 
         for (size_t i = iStart; i < iStop; i++) {
             for (size_t j = jStart; j < jStop; j++) {
                 newTableau->at(i,j) = tableau->at(i,j);
             }
         }
+
+        std::string* newVarNames = new std::string[newNumVars];
+        for (size_t j = 0; j < newNumVars; j++) {
+            newVarNames[j] = tableau->varNames[j];
+        }
+        newTableau->AddVarNames(newVarNames);
 
         //Copy over all constraint column values for original model equations, duplicated equations, and variable bounds and original objective function.
         //REGIONS: 16,26,36
@@ -1589,31 +1622,68 @@ public:
         tableau = newTableau;
     }
 
-    void Solve() {
-        size_t iterationNum = 0;
+    size_t Solve() {
+        iterationNum = 0;
         size_t liveUpdateIterCounter = 0;
         size_t liveUpdateTimeCounter = 0;
 
-        if (!auxProblemSolved) {
-            log(LOG_INFO,"Solving Auxilary Problem...");
-            size_t auxilaryProblemExitCode = SolveCurrentSetup(false,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
+        size_t exitCode = UNDETERMINED_STATUS;
 
-            //Assert that the auxilary problem was solved to optimality. Otherwise abort.
-            ASSERT(auxilaryProblemExitCode == OPTIMAL_SOLUTION_FOUND,"Error! Auxilary problem exited with a non-optimal solution code");
-            log(LOG_INFO,"Auxilary Problem Solved to Optimality.");
-            
-            //Assert that the auxilary problem was solved to an objective function value of 0. Otherwise the model is infeasible.
-            Scalar auxilaryObjectiveValue = tableau->GetObjectiveValue();
-            bool feasibleStatus = EqualsZero(auxilaryObjectiveValue);
-            ASSERT(feasibleStatus,"The model was proven to be infeasible.");
-            auxProblemSolved = true;
+        tic();
+        try {
+            if (!auxProblemSolved) {
+                log(LOG_INFO,"Solving Auxilary Problem...");
+                exitCode = SolveCurrentSetup(false,liveUpdateIterCounter,liveUpdateTimeCounter);
 
-            //Remove the auxilary variables, objective, etc. from the tableau
-            RemoveAuxilaryProblem();
+                //Assert that the auxilary problem was solved to optimality. Otherwise abort.
+                if (exitCode != OPTIMAL_SOLUTION_FOUND) {
+                    log(LOG_ERROR,"Error! Auxilary problem exited with a non-optimal solution code");
+                    throw exitCode;
+                }
+
+                log(LOG_INFO,"Auxilary Problem Solved to Optimality.");
+                
+                //Assert that the auxilary problem was solved to an objective function value of 0. Otherwise the model is infeasible.
+                Scalar auxilaryObjectiveValue = tableau->GetObjectiveValue();
+                bool feasibleStatus = EqualsZero(auxilaryObjectiveValue);
+                if (!feasibleStatus) {
+                    log(LOG_ERROR,"The model was proven to be infeasible.");
+                    throw INFEASIBLE;
+                }
+                auxProblemSolved = true;
+
+                //Remove the auxilary variables, objective, etc. from the tableau
+                RemoveAuxilaryProblem();
+            }
+
+            //Now that the auxilary problem is sovled, the tableau is ready to be solved normally.
+            exitCode = SolveCurrentSetup(maximizationProblem,liveUpdateIterCounter,liveUpdateTimeCounter);
         }
+        catch (const int& e) {
+            switch (e) {
+                case STOPPED_AT_MAX_ITER:
+                    exitCode = STOPPED_AT_MAX_ITER;
+                case STOPPED_AT_MAX_TIME:
+                    exitCode = STOPPED_AT_MAX_TIME;
+                case UNBOUNDED:
+                    exitCode = UNBOUNDED;
+                case INFEASIBLE:
+                    exitCode = INFEASIBLE;
+                case TERMINATE:
+                    exitCode = TERMINATE;
+            }
+        }
+        solveTime = toc();
 
-        //Now that the auxilary problem is sovled, the tableau is ready to be solved normally.
-        SolveCurrentSetup(maximizationProblem,iterationNum,liveUpdateIterCounter,liveUpdateTimeCounter);
+        return exitCode;
+    }
+
+    size_t GetNumIterations() {
+        return iterationNum;
+    }
+
+    Scalar GetSolveTime() {
+        return solveTime;
     }
 
     std::string TableauToString() {
@@ -1630,6 +1700,7 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
     py::class_<SimplexSolver>(handle, "SimplexSolver")
         .def(py::init<>())
         .def("EngageModel", static_cast<void (SimplexSolver::*)(size_t&, size_t&, std::vector<std::string>&, std::vector<Scalar>, std::vector<Scalar>, std::vector<Scalar>, std::vector<size_t>, std::vector<std::pair<Scalar,Scalar>>, std::vector<std::pair<bool,bool>>&, bool)>(&SimplexSolver::EngageModel))
+        .def("DisengageModel", &SimplexSolver::DisengageModel)
         .def("Solve", &SimplexSolver::Solve)
         .def("TableauToString", &SimplexSolver::TableauToString)
         .def("setMaxIter",&SimplexSolver::setMaxIter)
@@ -1638,5 +1709,7 @@ PYBIND11_MODULE(nathans_Simplex_solver_py, handle) {
         .def("GetVariableValue", static_cast<Scalar (SimplexSolver::*)(std::string, size_t)>(&SimplexSolver::GetVariableValue))
         .def("GetVariableValue", static_cast<Scalar (SimplexSolver::*)(size_t, size_t)>(&SimplexSolver::GetVariableValue))
         .def("GetObjectiveValue",&SimplexSolver::GetObjectiveValue)
-        .def("SetLiveUpdateSettings",&SimplexSolver::SetLiveUpdateSettings);
+        .def("SetLiveUpdateSettings",&SimplexSolver::SetLiveUpdateSettings)
+        .def("GetNumIterations", &SimplexSolver::GetNumIterations)
+        .def("GetSolveTime", &SimplexSolver::GetSolveTime);
 }

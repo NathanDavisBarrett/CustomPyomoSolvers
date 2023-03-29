@@ -8,24 +8,79 @@ import numpy as np
 
 import nathans_Simplex_solver_py
 
+class SolverResults:
+        def __init__(self,logs,finalStatus,numIter,time,objValue):
+            self.logs = logs
+            self.finalStatus = finalStatus
+            self.numIter = numIter
+            self.time = time
+            self.objValue = objValue
+
+        def write(self):
+            if len(self.logs) > 0:
+                print("########## Solver Messages ##########")
+                for _,message in self.logs:
+                    print("\t{}".format(message))
+                print("#####################################")
+
+            print("############## RESULTS ##############")
+            print("Final Status         :",self.finalStatus)
+            print("Number of Iterations :",self.numIter)
+            print("Execution Time       :",self.time)
+            print("Final Objective Value:",self.objValue)
+            print("#####################################")
+
 class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
     def __init__(self):
         self.availableOptions = {
-            "Basis_IO_Approach": ["MaximizeRC"],
             "maxIter": ["AnyPositiveInt"],
             "maxTime": ["AnyPositiveFloat"],
             "LiveUpdate": [False,"iter","time"],
             "LiveUpdateIter": ["AnyPositiveFloat"],
-            "LiveUpdateTime": ["AnyPositiveFloat"]
+            "LiveUpdateTime": ["AnyPositiveFloat"],
+            "BasisReductionMethod": ["AVERAGE","FIRST"]
         }
         self.currentOptions = {
-            "Basis_IO_Approach": "RC",
             "maxIter": np.iinfo(np.int64).max,
             "maxTime": np.inf,
             "LiveUpdate": False,
             "LiveUpdateIter": np.iinfo(np.int64).max,
-            "LiveUpdateTime": np.inf
+            "LiveUpdateTime": np.inf,
+            "BasisReductionMethod": "FIRST"
         }
+
+        self.codes = {
+            "logLevels": {
+                0: "ERROR",
+                1: "WARN",
+                2: "INFO"
+            },
+            "basisReductionOptions": {
+                0: "AVERAGE",
+                1: "FIRST",
+                100: "INVALID"
+            },
+            "finalStatus": {
+                0: "OPTIMAL_SOLUTION_FOUND",
+                1: "STOPPED_AT_MAX_ITER",
+                2: "STOPPED_AT_MAX_TIME",
+                3: "UNBOUNDED",
+                4: "INFEASIBLE",
+                5: "UNDETERMINED_STATUS",
+                1234567890: "TERMINATE"
+            },
+            "constraintTypes": {
+                0: "EQ",
+                1: "LEQ",
+                2: "GEQ"
+            }
+        }
+        categories = list(self.codes.keys())
+        for category in categories:
+            keys = list(self.codes[category].keys())
+            for key in keys:
+                val = self.codes[category][key]
+                self.codes[category][val] = key
 
     def _recurseExprTree(self,expr,varNames,multiplier=1):
         coefs = np.zeros(len(varNames))
@@ -55,7 +110,7 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 const += result[1]
 
             return [coefs * multiplier, const * multiplier]
-        elif "GeneralVarData" in exprType:
+        elif "GeneralVarData" in exprType or "ScalarVar" in exprType:
             varName = str(expr)
             varIndex = varNames.index(varName)
             coefs[varIndex] = multiplier
@@ -128,21 +183,16 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 raise Exception("Error! The variable {} is not continuous. This Simplex Solver can only handle continuous variables. Did you mean to call NathansMILPSolver?")
 
         constrExpressions = [str(constr.expr) for constr in modelData._con]
-        TODO: append the variable bounds as constraints.
-        TODO: if variables are allowed to be negative, create the associated augmented variable to handle it.
 
-        constrEQ = 0
-        constrLEQ = 1
-        constrGEQ = 2
         constrTypes = np.zeros(len(constrExpressions),dtype=int)
 
         for i in range(len(constrExpressions)):
             if "<=" in constrExpressions[i]:
-                constrTypes[i] = constrLEQ
+                constrTypes[i] = self.codes["constraintTypes"]["LEQ"]
             elif ">=" in constrExpressions:
-                constrTypes[i] = constrGEQ
+                constrTypes[i] = self.codes["constraintTypes"]["GEQ"]
             else:
-                constrTypes[i] = constrEQ
+                constrTypes[i] = self.codes["constraintTypes"]["EQ"]
                 
 
         #Assemble Matrices
@@ -165,10 +215,10 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
                 #Standard form has no negative in the constant column
                 constData *= -1
                 varData *= -1
-                if constrTypes[i] == constrLEQ:
-                    constrTypes[i] = constrGEQ:
-                elif constrTypes[i] == constrGEQ:
-                    constrTypes[i] = constrLEQ
+                if constrTypes[i] == self.codes["constraintTypes"]["LEQ"]:
+                    constrTypes[i] = self.codes["constraintTypes"]["GEQ"]
+                elif constrTypes[i] == self.codes["constraintTypes"]["GEQ"]:
+                    constrTypes[i] = self.codes["constraintTypes"]["LEQ"]
 
             A[i,:] = varData
             b[i] = constData
@@ -181,34 +231,36 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         c = np.append(recurseC[0],recurseC[1])
 
         #Collect all variable bounds.
-        bounds = [var.bounds for var in modelData._var]
+        bounds = [tuple([b if b != None else 0 for b in var.bounds]) for var in modelData._var]
         boundActivations = [tuple([b != None for b in var.bounds]) for var in modelData._var]
 
         maximizationProblem = modelData._obj[0].sense == pyo.maximize
 
         #Now pass these matrices to C++        
-        if self.currentOptions["Basis_IO_Approach"] == "RC":
-            solver = nathans_Simplex_solver_py.SimplexSolver_RC()
-            solver.setMaxIter(self.currentOptions["maxIter"])
-            solver.setMaxTime(self.currentOptions["maxTime"])
-        else:
-            raise Exception("The Basis_IO_Approach \"{}\" went un-initialized. This is a bug.")
+        solver = nathans_Simplex_solver_py.SimplexSolver()
+        solver.setMaxIter(self.currentOptions["maxIter"])
+        solver.setMaxTime(self.currentOptions["maxTime"])
 
         if self.currentOptions["LiveUpdate"]:
             solver.SetLiveUpdateSettings(self.currentOptions["LiveUpdateIter"],self.currentOptions["LiveUpdateTime"])
 
-        solver.EngageModel(numVar,numConstr,varNames,b,c,constrTypes,bounds,boundActivations,maximizationProblem)
-        solver.Solve()
+        solver.EngageModel(numVar,numConstr,varNames,A.ravel(),b,c,constrTypes,bounds,boundActivations,maximizationProblem)
+        exitCode = solver.Solve()
 
         logs = solver.GetLogs()
-        logLevels = ["ERROR"," WARN"," INFO"]
-        if len(logs) > 0:
-            print("Solver Messages:")
-        for level,message in logs:
-            print("\t{}: {}".format(logLevels[level],message))
+        finalStatus = self.codes["finalStatus"][exitCode]
+        numIter = solver.GetNumIterations()
+        time = solver.GetSolveTime()
+        objValue = solver.GetObjectiveValue()
+        
+        basisReductionMethodCode = self.codes["basisReductionOptions"][self.currentOptions["BasisReductionMethod"]]
         
         for var in modelData._var:
-            var.value = solver.GetVariableValue(var.name)
+            var.value = solver.GetVariableValue(var.name,basisReductionMethodCode)
+
+        results = SolverResults(logs,finalStatus,numIter,time,objValue)
+
+        return results
 
 SolverFactory.register('NathansSimplexSolver', doc='Basic Simplex Solver by Nathan Barrett')(NathansSimplexSolver)
 
