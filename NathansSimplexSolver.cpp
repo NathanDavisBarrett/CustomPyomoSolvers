@@ -1392,7 +1392,32 @@ public:
             tableau->computeBasis();
         }
 
-        return tableau->basis->GetVariableValue(varIndex, basisReductionOption)
+        Scalar tableauValue = tableau->basis->GetVariableValue(varIndex, basisReductionOption);
+        Scalar augmentedValue = 0.0;
+        bool augmented = false;
+
+        if (augmented_OldToNew_Index[varIndex] != -1) {
+            augmentedValue = tableau->basis->GetVariableValue(augmented_OldToNew_Index[varIndex]);
+            augmented = true;
+        }
+        else if (augmented_NewToOld_Index[varIndex] != -1) {
+            augmentedValue = tableauValue;
+            tableauValue = tableau->basis->GetVariableValue(augmented_NewToOld_Index[varIndex]);
+
+            augmented = true;
+        }
+
+        if (augmented) {
+            return tableauValue - augmentedValue; //Augmented variables do not have shift or invert operations done to them.
+        }
+        else {
+            if (invertStatus[varIndex]) {
+                return -tableauValue + shiftValues[varIndex];
+            }
+            else {
+                return tableauValue - shiftValues[varIndex];
+            }
+        }
     }
 
     Scalar GetVariableValue(std::string varName, size_t basisReductionOption = BASIS_REDUCTION_AVG) {
