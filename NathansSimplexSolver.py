@@ -264,8 +264,3 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         return results
 
 SolverFactory.register('NathansSimplexSolver', doc='Basic Simplex Solver by Nathan Barrett')(NathansSimplexSolver)
-
-class NathansMILPSolver(CustomSolverResources.GenericSolverInterface):
-    pass
-
-SolverFactory.register('NathansMILPSolver', doc='Basic MILP Solver by Nathan Barrett')(NathansMILPSolver)
