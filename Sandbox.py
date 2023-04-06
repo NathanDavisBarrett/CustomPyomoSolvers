@@ -188,7 +188,7 @@ assert percError(model.obj(), myObj) < percErrorTollerance
 
 model = pyo.ConcreteModel()
 
-model.x = pyo.Var(domain=pyo.NonNegativeReals,bounds=(0.5,None))
+model.x = pyo.Var(domain=pyo.NonNegativeReals,bounds=(1,None))
 model.y = pyo.Var(domain=pyo.NonNegativeReals)
 
 x = model.x
@@ -200,7 +200,7 @@ model.c3 = pyo.Constraint(expr= y >= 1.2*x-0.5)
 model.c4 = pyo.Constraint(expr= y <= -0.5*x + 3)
 model.c5 = pyo.Constraint(expr= y == 1.1*x+0.5)
 
-model.obj = pyo.Objective(expr= x + y)
+model.obj = pyo.Objective(expr= x + y,sense=pyo.maximize)
 
 solver = pyo.SolverFactory('NathansSimplexSolver')
 result = solver.solve(model)#.write()
@@ -212,7 +212,6 @@ myObj = deepcopy(model.obj())
 solver = pyo.SolverFactory('gurobi')
 result = solver.solve(model)
 
-print(model.x.value, myX)
 assert percError(model.x.value, myX) < percErrorTollerance
 assert percError(model.y.value, myY) < percErrorTollerance
 assert percError(model.obj(), myObj) < percErrorTollerance
@@ -248,7 +247,6 @@ myObj = deepcopy(model.obj())
 solver = pyo.SolverFactory('gurobi')
 result = solver.solve(model)
 
-print(model.x.value, myX)
 assert percError(model.x.value, myX) < percErrorTollerance
 assert percError(model.y.value, myY) < percErrorTollerance
 assert percError(model.obj(), myObj) < percErrorTollerance
@@ -284,7 +282,6 @@ myObj = deepcopy(model.obj())
 solver = pyo.SolverFactory('gurobi')
 result = solver.solve(model)
 
-print(model.x.value, myX)
 assert percError(model.x.value, myX) < percErrorTollerance
 assert percError(model.y.value, myY) < percErrorTollerance
 assert percError(model.obj(), myObj) < percErrorTollerance

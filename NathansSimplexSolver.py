@@ -253,10 +253,11 @@ class NathansSimplexSolver(CustomSolverResources.GenericSolverInterface):
         time = solver.GetSolveTime()
         objValue = solver.GetObjectiveValue()
         
-        basisReductionMethodCode = self.codes["basisReductionOptions"][self.currentOptions["BasisReductionMethod"]]
-        
-        for var in modelData._var:
-            var.value = solver.GetVariableValue(var.name,basisReductionMethodCode)
+        if exitCode == self.codes["finalStatus"]["OPTIMAL_SOLUTION_FOUND"]:
+            basisReductionMethodCode = self.codes["basisReductionOptions"][self.currentOptions["BasisReductionMethod"]]
+            
+            for var in modelData._var:
+                var.value = solver.GetVariableValue(var.name,basisReductionMethodCode)
 
         results = SolverResults(logs,finalStatus,numIter,time,objValue)
 

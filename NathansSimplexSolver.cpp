@@ -1,4 +1,8 @@
-//from https://www.youtube.com/watch?v=_5T70cAXDJ0 Stopped at 2:08
+/*
+FUTURE IMPROVEMENTS:
+* Remove the original objective function column. It's not nececary and we could speed up the transition from aux. to main problem by not having to copy anything over (just redifine the bounds of the tableau)
+* Instead of replacing each EQ constraint with a LEQ and a GEQ, we could just not add a slack var (just add a art. var) and it serves the same purpose.
+*/
 
 #include<pybind11/pybind11.h>
 #include<pybind11/stl.h>
@@ -240,8 +244,8 @@ public:
 
     T& at(size_t row, size_t col) {
         //FIXME: For production code, comment out these lines.
-        ASSERT(row < tableauHeight,"Out of bounds error!");
-        ASSERT(col < tableauWidth,"Out of bounds error!");
+        ASSERT(row < tableauHeight,"Row out of bounds!");
+        ASSERT(col < tableauWidth,"Col out of bounds!");
 
         return tableauBody[row * tableauWidth + col];
     }
@@ -354,7 +358,7 @@ public:
 
             ASSERT(numNonzeroEntries != 0,"Error! There is a zero column in the tableau.");
 
-            if (numNonzeroEntries == 1) {
+            if ((numNonzeroEntries == 1) && (nonZeroEntry > 0)) {
                 basis.AddEntry(i, rowIndex, nonZeroEntry, this->at(rowIndex, tableauWidth-1));
             }
         }
@@ -755,26 +759,25 @@ public:
                 //So we don't have to add any constraints or variables.
                 /*
                 Example:
-                    -5*x1 + 2*x2 <= 2
+                    5*x1 + 2*x2 <= 2
                     2 <= x1 <= 3
 
                     Becomes
-                    -5*x1' + 2*x2 <= -8
+                    5*x1' + 2*x2 <= -8
                     0 <= x1' <= 1
 
-                    Here, the shift value would be -2 since x1' = x1 - 2
+                    Here, the shift value would be 2 since x1 = x1' + 2
 
                     Note that we'll also need to multiply this whole equation by -1 in order to maintain standard form.
                 */
                 if (lowerBound != 0) {
+                    shiftValues[i] = lowerBound;
+                    initBounds[i].first = 0;
                     for (size_t j = 0; j < initNumConstr; j++) {
-                        initB[j] += lowerBound * initA[j * initNumVar + i];
+                        initB[j] -= lowerBound * initA[j * initNumVar + i];
                     }
 
                     initC[initNumVar] += lowerBound * initC[i];
-                    
-                    shiftValues[i] = -lowerBound;
-                    initBounds[i].first = 0;
                 }
 
                 if (hasUpperBound) {
@@ -800,13 +803,14 @@ public:
                     -3*x1' + 2*x2 <= -8
                     x1' >= 0
 
-                    Here, the invertStatus would be true and the shift value would be 3 since x1' = -x1 + 3
+                    Here, the invertStatus would be true and the shift value would be 3 since x1 = -x1' + 3
 
                     Note that we don't need to adda constraint here since x1' is already in standard form.
                     Also note that we'll need to multiply this whole equation by -1 in order to maintain standard form.
                     */
                     initC[initNumVar] -= upperBound * initC[i];
                     initC[i] *= -1;
+
                     for (size_t j = 0; j < initNumConstr; j++) {
                         initB[j] -= upperBound * initA[j * initNumVar + i];
                         initA[j * initNumVar + i] *= -1;
@@ -918,7 +922,7 @@ public:
         }
         //2.4: Now create the artificial variables. These will be indexed in sequence following the slack variables.
         std::string baseArtVarNAme = "ARTIF_VAR_";
-        for (size_t i = 0; i < numGEQ; i++) {
+        for (size_t i = 0; i < numArtificialVars; i++) {
             varNames[numBaseVar + numAugmentedVariables + numSlackSurplusVars + i] = baseArtVarNAme + std::to_string(i);
         }
         //2.5: If artificial variables are present, the last variable will the objective of the original problem.
@@ -1051,10 +1055,10 @@ public:
             tableau->at(i,j) = initB[i];
         }
 
-        //3.2 Duplated Equality Constraints
+        //3.2 Duplicated Equality Constraints
         //3.2.1 REGION 21 & 22, Coefs of the original and augmented variables in the model equality constraints (adjusted for variable shifts and inverts) that are duplicated.
         size_t iStart = initNumConstr;
-        size_t iStop = initNumConstr + numEQ;
+        size_t iStop = initNumConstr + numDuplicatedConstr;
         for (size_t newI = iStart; newI < iStop; newI++) {
             size_t oldI = (size_t) duplicatedConstr_NewToOld_Index[newI];
             for (size_t j = 0; j < initNumVar + numAugmentedVariables; j++) {
@@ -1064,7 +1068,7 @@ public:
 
         //3.2.2 REGION 23, Surplus Variables for each of the duplicated equality constraints.
         jStart = initNumVar + numAugmentedVariables;
-        jStop = initNumVar + numAugmentedVariables + initNumConstr + numEQ;
+        jStop = initNumVar + numAugmentedVariables + numSlackSurplusVars;
         for (size_t i = iStart; i < iStop; i++) {
             for (size_t j = jStart; j < jStop; j++) {
                 tableau->at(i,j) = 0;
@@ -1074,7 +1078,7 @@ public:
 
         //3.2.3 REGION 24, Artificial variables for each of the duplicated equality constraints.
         //Same iStart and iStop as REGION 23
-        jStart = initNumVar + numAugmentedVariables + initNumConstr + numEQ;
+        jStart = initNumVar + numAugmentedVariables + numSlackSurplusVars;
         jStop = jStart + numArtificialVars;
         for (size_t i = iStart; i < iStop; i++) {
             for (size_t j = jStart; j < jStop; j++) {
@@ -1086,7 +1090,7 @@ public:
 
         //3.2.4 REGION 25 Original objective function variable in the duplicated equality constraints.
         if (!auxProblemSolved) {
-            size_t j = initNumVar + initNumConstr + numEQ + numArtificialVars;
+            size_t j = initNumVar + numSlackSurplusVars + numArtificialVars;
             for (size_t i = iStart; i < iStop; i++) {
                 tableau->at(i,j) = 0;
             }
@@ -1313,15 +1317,25 @@ public:
         maxTime = newMaxTime;
     }
 
-    bool LessThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
+    bool LessThanZero(const Scalar& val, const Scalar& tollerance = 1e-9) {
         return (val + tollerance) < 0.0;
     }
 
-    bool GreaterThanZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
+    bool GreaterThanZero(const Scalar& val, const Scalar& tollerance = 1e-9) {
         return (val - tollerance) > 0.0;
     }
 
-    bool EqualsZero(const Scalar& val, const Scalar& tollerance = 1e-7) {
+    bool Equals(const Scalar& val1, const Scalar& val2, const Scalar& tollerance = 1e-9) {
+        Scalar difference = val1 - val2;
+        if (difference < 0) {
+            return -difference < tollerance;
+        }
+        else {
+            return difference < tollerance;
+        }
+    }
+
+    bool EqualsZero(const Scalar& val, const Scalar& tollerance = 1e-9) {
         if (val < 0) {
             return -val < tollerance;
         }
@@ -1388,13 +1402,46 @@ public:
         return columnIndex;
     }
 
-    size_t ComputePivotRow(size_t pivotCol) {
+    bool CorrespondsToArtVar(size_t pivotRow) {
+        size_t colStart = numBaseVar + numAugmentedVariables + numSlackSurplusVars;
+        size_t colEnd = colStart + numArtificialVars;
+
+        size_t rowStart = 0;
+        size_t rowEnd = tableau->tableauHeight;
+
+        for (size_t i = colStart; i < colEnd; i++) {
+            //Check to see if this Art. Var's row is nonzero. If it is zero, then there's no point in looking at this column any further.
+            Scalar colTest = tableau->at(pivotRow,i);
+            if (EqualsZero(colTest)) {
+                continue;
+            }
+
+            //Now check to see if there are any other nonzero values in the column. If there are, then this Art. Var is not in the basis, so we'll skip.
+            bool isInBasis = true;
+            for (size_t j = rowStart; j < rowEnd; j++) {
+                if (j == pivotRow) {
+                    continue;
+                }
+                if (!EqualsZero(tableau->at(j,i))) {
+                    isInBasis = false;
+                    break;
+                }
+            }
+            if (isInBasis) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    size_t ComputePivotRow(size_t pivotCol, bool prioritizeArtificialVars = false) {
         size_t rowIndex = 0;
 
         auto constColItr = tableau->ConstColIterator();
         auto pivColItr = tableau->ColumnIterator(pivotCol);
 
         Scalar minComparisonVal;
+
         if (LessThanZero(*pivColItr)) { // Since we're only interested in the smallest positive value. Note that we're only looking at the pivot value since the constant column will allways be positive.
             minComparisonVal = SCALAR_INF; 
         }
@@ -1420,6 +1467,15 @@ public:
             if (comparisonVal < minComparisonVal) {
                 rowIndex = j;
                 minComparisonVal = comparisonVal;
+            }
+            else if (prioritizeArtificialVars) {
+                if (Equals(comparisonVal,minComparisonVal)) {
+                    if (CorrespondsToArtVar(j)) {
+                        //The row corresponding to a artificial variable in the basis takes priority
+                        rowIndex = j;
+                        minComparisonVal = comparisonVal;
+                    }
+                }
             }
         }
 
@@ -1485,7 +1541,7 @@ public:
                 return -tableauValue + shiftValues[varIndex];
             }
             else {
-                return tableauValue - shiftValues[varIndex];
+                return tableauValue + shiftValues[varIndex]; 
             }
         }
     }
@@ -1557,7 +1613,7 @@ public:
             size_t pivotCol = ComputePivotColumn(maximize);
             size_t pivotRow;
             try {
-                pivotRow = ComputePivotRow(pivotCol);
+                pivotRow = ComputePivotRow(pivotCol, !auxProblemSolved);
             }
             catch (const int& e) {
                 switch (e) {
@@ -1616,6 +1672,25 @@ public:
         for (size_t i = iStart; i < iStop; i++) {
             newTableau->at(i,newJ) = tableau->at(i,oldJ);
         }
+
+        //Assert that none of the artificial variables are in the basis
+        /*
+        jStart = newNumVars;
+        jStop = jStart + numArtificialVars;
+        for (size_t j = jStart; j < jStop; j++) {
+            size_t numNonzeroEntries = 0
+            for (auto itr = tableau->ColumnIterator(j); !itr.isEnd(); itr++) {
+                if (!EqualsZero(*itr)) {
+                    numNonzeroEntries++;
+                    if (numNonzeroEntries == 2) {
+                        //There are more than one nonzeros. This is good since it means that this art. var is not in the basis.
+                        break;
+                    }
+                }
+            }
+            ASSERT(numNonzeroEntries == 1,"Error! There was still an artificial variable in the auxilary basis! This will likely produce an infeasible solution!"); 
+        }
+        */ //This should now be handled by prioritizing artificial variable removal from the basis while soving the auxilary problem. See CorrespondsToArtVar.
 
         //Delete the old tableau and replace it with the new one.
         delete tableau;
