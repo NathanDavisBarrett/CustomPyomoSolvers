@@ -17,7 +17,11 @@ FUTURE IMPROVEMENTS:
 #include<map> //map
 #include<cmath> //signbit, abs
 
-#include <unistd.h> //sleep
+#include "concerruentqueue.h"
+
+#include "ThreadManager.h"
+
+ThreadManager threadManager = ThreadManager()
 
 #define LOG_ERROR 0
 #define LOG_WARN 1
@@ -368,6 +372,35 @@ public:
 
     Scalar GetObjectiveValue() {
         return tableauBody[tableauHeight * tableauWidth - 1];
+    }
+
+    size_t GetIndexOfMaxMinObjRow(bool max) {
+        size_t chunkSize = ???//INSERT EMPIRICAL RELATIONSHIP HERE! (it should probably depend on tableauwidth)
+        size_t numChunks = tableauWidth / chunkSize + 1;
+
+        std::atomic<size_t> optimalIndex = 0;
+
+        GetMaxMinOfContiguousArray* tasks = new[numChunks];
+
+        for (size_t i = 0; i < numChunks-1; i++) {
+            size_t start = tableauWidth * numVar + chunkSize * i;
+            size_t stop = start + chunkSize;
+            tasks[i] = GetMaxMinOfContiguousArray(
+                tableauBody, 
+                &optimalIndex, 
+                max, 
+                start,
+                stop
+            );
+
+            threadManager.AddTask(&(tasks[i]));
+        }
+
+        WaitForTasksToBeDone(tasks,numChunks);
+
+        delete[] tasks;
+
+        return optimalIndex;
     }
 
     void AddVarNames(std::vector<std::string> initVarNames) {
