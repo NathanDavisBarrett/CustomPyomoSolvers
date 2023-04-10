@@ -7,77 +7,100 @@
 
 #include <thread>
 #include <mutex>
-#include <vector>
-#include <unistd> //sleep
 
 #define THREAD_STANDBY 0
-#define THREAD_TERMINATE 1
-#define THREAD_ERROR 2
+#define THREAD_ACTIVE 1
+#define THREAD_WAITING 2
+#define THREAD_TERMINATE 3
+#define THREAD_ERROR 4
+
+void ThreadFunction(moodycamel::ConcurrentQueue<TaskFunctor*>* taskQueue, int* masterSignal , int* status, size_t threadID) {
+    TaskFunctor* myTask = NULL;
+
+    while (*masterSignal != THREAD_TERMINATE) {                  
+        if (*masterSignal == THREAD_STANDBY) {
+            *status = THREAD_STANDBY;
+            continue;
+        }
+
+        //Try to grab a job from the taskQueue.
+        if(!taskQueue->try_dequeue(myTask)) {
+            //This cannot hang. Otherwise it will go into deadlock.
+            *status = THREAD_WAITING;
+            continue;
+        }
+        
+        *status = THREAD_ACTIVE;
+
+        //Execute that task
+        try {
+            myTask->Execute();
+            myTask->complete = true;
+        }
+        catch (...) {
+            *status = THREAD_ERROR;
+            myTask->error = true;
+        }
+        myTask = NULL;
+    }
+
+    *status = THREAD_TERMINATE;
+}
 
 class ThreadManager {
 public:
     size_t numThreads;
     moodycamel::ConcurrentQueue<TaskFunctor*> taskQueue;
 
-    std::vector<std::thread> threads;
-    std::vector<int> threadStatuses;
+    std::thread* threads;
+    int* threadStatuses;
 
-    size_t masterSignal = THREAD_STANDBY;
+    int masterSignal = THREAD_STANDBY;
 
     ThreadManager(size_t initNumThreads) {
+        masterSignal = THREAD_ACTIVE;
+
         numThreads = initNumThreads;
 
-        threadStatuses = std::vector<int>(numThreads,THREAD_STANDBY);
+        threads = new std::thread[numThreads];
+        threadStatuses = new int[numThreads];
 
-        for (size_t i = o; i < numThreads; i++) {
-            threads.emplace_back([&](){
-                size_t threadID = i;
-                TaskFunctor* myTask = NULL;
-
-                while (masterSignal != THREAD_TERMINATE) {                    
-                    if (masterSignal == THREAD_STANDBY) {
-                        continue;
-                    }
-
-                    //Try to grab a job from the taskQueue.
-                    if(!taskQueue.try_dequeue(myTask)) {
-                        //This cannot hand. Otherwise it will go into deadlock.
-                        continue
-                    }
-
-                    //Execute that task
-                    try {
-                        myTask->Execute();
-                        myTask->complete = true;
-                    }
-                    catch {
-                        threadStatuses[threadID] = THREAD_ERROR;
-                        myTask->error = true;
-                    }
-                    myTask = NULL;
-                }
-
-                threadStatuses[threadID] = THREAD_TERMINATE;
-            });
+        for (size_t i = 0; i < numThreads; i++) {
+            threadStatuses[i] = THREAD_WAITING;
+            threads[i] = std::thread(ThreadFunction,&taskQueue,&masterSignal,&(threadStatuses[i]),i);
+            while (threadStatuses[i] != THREAD_WAITING) {
+                //Wait for the thread to fully activate.
+            }
         }
     }
     ThreadManager(): ThreadManager((size_t) std::thread::hardware_concurrency()) {}
 
+    void PauseAll() {
+        masterSignal = THREAD_STANDBY;
+    }
+
+    void ResumeAll() {
+        masterSignal = THREAD_ACTIVE;
+    }
+
     void TerminateThreads() {
         masterSignal = THREAD_TERMINATE;
-        for (size_t i == 0; i < numThreads; i++) {
+        for (size_t i = 0; i < numThreads; i++) {
             while (threadStatuses[i] != THREAD_TERMINATE) {
                 //Inifinite loop until the thread registers the terminate status.
             }
+            threads[i].join();
         }
     }
 
     void AddTask(TaskFunctor* newTask) {
-        taskQueue.enquque(newTask);
+        taskQueue.enqueue(newTask);
     }
 
     ~ThreadManager() {
         TerminateThreads();
+        delete[] threads; 
+        delete[] threadStatuses;
     }
 };
 

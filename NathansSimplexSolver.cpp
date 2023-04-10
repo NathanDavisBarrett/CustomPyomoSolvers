@@ -49,6 +49,15 @@ float DummyFunc(float arg1, float arg2) {
     return arg1 + arg2;
 }
 
+template <typename T>
+void WaitForTasksToBeDone(T* tasks, size_t numTasks) {
+    for (size_t i = 0; i < numTasks; i++) {
+        while (!tasks[i].complete) {
+            //Infinite loop till it's complete.
+        }
+    }
+}
+
 typedef std::chrono::high_resolution_clock clock_;
 typedef std::chrono::duration<double, std::ratio<1> > second_;
 
@@ -375,8 +384,8 @@ public:
     }
 
     size_t GetIndexOfMaxMinObjRow(bool max) {
-        size_t chunkSize = ???//INSERT EMPIRICAL RELATIONSHIP HERE! (it should probably depend on tableauwidth)
-        size_t numChunks = tableauWidth / chunkSize + 1;
+        size_t numChunks = threadManager.numThreads;
+        size_t chunkSize = (tableauWidth / numChunks) + 1
 
         std::atomic<size_t> optimalIndex = 0;
 
@@ -395,6 +404,16 @@ public:
 
             threadManager.AddTask(&(tasks[i]));
         }
+        size_t start = chunkSize * (numChunks-1);
+        size_t stop = arraySize;
+        tasks[numChunks-1] = GetMaxMinOfContiguousArray(
+            arr, 
+            &optimalIndex, 
+            start,
+            stop,
+            true
+        );
+        threadManager.AddTask(&(tasks[numChunks-1]));
 
         WaitForTasksToBeDone(tasks,numChunks);
 
@@ -1409,30 +1428,31 @@ public:
     }
 
     size_t ComputePivotColumn(bool maximize) {
-        size_t columnIndex = 0;
-        auto itr = tableau->ObjRowIterator();
-        if (maximize) {
-            Scalar minBottomVal = *itr;
-            ++itr;
-            for (size_t j = 1; !itr.isEnd(); ++itr, j++) {
-                if (*itr < minBottomVal) {
-                    minBottomVal = *itr;
-                    columnIndex = j;
-                }
-            }
-        }
-        else {
-            Scalar maxBottomVal = *itr;
-            ++itr;
-            for (size_t j = 1; !itr.isEnd(); ++itr, j++) {
-                if (*itr > maxBottomVal) {
-                    maxBottomVal = *itr;
-                    columnIndex = j;
-                }
-            }
-        }
+        return tableau->GetIndexOfMaxMinObjRow(maximize);
+        // size_t columnIndex = 0;
+        // auto itr = tableau->ObjRowIterator();
+        // if (maximize) {
+        //     Scalar minBottomVal = *itr;
+        //     ++itr;
+        //     for (size_t j = 1; !itr.isEnd(); ++itr, j++) {
+        //         if (*itr < minBottomVal) {
+        //             minBottomVal = *itr;
+        //             columnIndex = j;
+        //         }
+        //     }
+        // }
+        // else {
+        //     Scalar maxBottomVal = *itr;
+        //     ++itr;
+        //     for (size_t j = 1; !itr.isEnd(); ++itr, j++) {
+        //         if (*itr > maxBottomVal) {
+        //             maxBottomVal = *itr;
+        //             columnIndex = j;
+        //         }
+        //     }
+        // }
 
-        return columnIndex;
+        // return columnIndex;
     }
 
     bool CorrespondsToArtVar(size_t pivotRow) {
