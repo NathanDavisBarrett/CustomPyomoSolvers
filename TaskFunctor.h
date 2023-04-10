@@ -2,6 +2,8 @@
 #define TASK_FUNCTOR_H
 
 #include <atomic>
+#include <unistd.h>
+#include <sstream>
 
 class TaskFunctor {
 public:
@@ -9,14 +11,6 @@ public:
     bool error = false;
     virtual void Execute() = 0;
 };
-
-void WaitForTasksToBeDone(TaskFunctor* tasks, size_t numTasks) {
-    for (size_t i = 0; i < numTasks; i++) {
-        while (!tasks[i].complete) {
-            //Infinite loop till it's complete.
-        }
-    }
-}
 
 template <typename T>
 class GetMaxMinOfContiguousArray: public TaskFunctor {
@@ -29,7 +23,19 @@ public:
 
     std::atomic<size_t>* indexToBeat;
 
-    GetMaxMinOfContiguousArray(T* initBaseArray, std::atomic<size_t>* initIndexToBeat, bool initMax = true, size_t initIndexStart, size_t initIndexStop, size_t initStepSize = 1) {
+    GetMaxMinOfContiguousArray() {
+        baseArray = NULL;
+        indexStart = 0;
+        indexStop = 0;
+        stepSize = 0;
+        max = false;
+        indexToBeat = NULL;
+
+        complete = false;
+        error = false;
+    }
+
+    GetMaxMinOfContiguousArray(T* initBaseArray, std::atomic<size_t>* initIndexToBeat, size_t initIndexStart, size_t initIndexStop, bool initMax = true, size_t initStepSize = 1) {
         baseArray = initBaseArray;
         indexToBeat = initIndexToBeat;
 
@@ -38,24 +44,28 @@ public:
 
         stepSize = initStepSize;
         max = initMax;
+
+        complete = false;
+        error = false;
     }
 
     void Execute() {
         if (max) {
-            for (size_t i = indexStart + 1; i < indexStop; i += stepSize) {
+            for (size_t i = indexStart; i < indexStop; i += stepSize) {
                 if (baseArray[i] > baseArray[*indexToBeat]) {
                     *indexToBeat = i;
                 }
             }
         }
         else {
-            for (size_t i = indexStart + 1; i < indexStop; i += stepSize) {
+            for (size_t i = indexStart; i < indexStop; i += stepSize) {
                 if (baseArray[i] < baseArray[*indexToBeat]) {
                     *indexToBeat = i;
                 }
             }
         }
+        complete = true;
     }
-}
+};
 
 #endif

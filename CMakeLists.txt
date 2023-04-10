@@ -12,4 +12,4 @@ find_package(Threads REQUIRED)
 add_subdirectory(pybind11)
 pybind11_add_module(nathans_Simplex_solver_py NathansSimplexSolver.cpp)
 
-target_link_properties(nathans_simplex_solver LINK_FLAGS "${CMAKE_THREAD_LIBS_INIT}")
+set_target_properties(parallelization_benchmarks PROPERTIES LINK_FLAGS "${CMAKE_THREAD_LIBS_INIT}")
